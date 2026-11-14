@@ -108,18 +108,31 @@ fun ViewfinderControls(
             Box(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
-                    .padding(top = 12.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(TranslucentPillBackground)
-                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                    .padding(top = 14.dp, start = 16.dp, end = 16.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(Color(0xCC101010))
+                    .border(0.75.dp, Color(0x44FFC107), RoundedCornerShape(16.dp))
+                    .padding(horizontal = 14.dp, vertical = 7.dp)
             ) {
-                Text(
-                    text = uiState.telemetrySummary,
-                    color = GoldAccent,
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Medium
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(6.dp)
+                            .clip(CircleShape)
+                            .background(GoldAccent)
+                    )
+                    Text(
+                        text = uiState.telemetrySummary,
+                        color = White,
+                        fontSize = 10.5.sp,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Medium,
+                        letterSpacing = 0.3.sp
+                    )
+                }
             }
         }
 

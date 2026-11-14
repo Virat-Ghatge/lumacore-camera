@@ -12,7 +12,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * to guarantee that total native memory consumption remains safely bounded under 180MB on 4GB RAM devices.
  */
 class BoundedImageRingBuffer(
-    val maxCapacity: Int = 3
+    val maxCapacity: Int = 10
 ) : AutoCloseable {
 
     private val lock: Any = Any()

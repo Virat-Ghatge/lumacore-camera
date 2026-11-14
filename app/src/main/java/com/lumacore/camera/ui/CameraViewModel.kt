@@ -144,8 +144,25 @@ class CameraViewModel(
     }
 
     fun onCaptureModeSelected(mode: CaptureMode): Unit {
+        if (mode == CaptureMode.VIDEO_V2) {
+            android.widget.Toast.makeText(
+                getApplication<Application>().applicationContext,
+                "Video mode coming in v2",
+                android.widget.Toast.LENGTH_SHORT
+            ).show()
+            return
+        }
+
         _uiState.update { current: CameraUiState ->
-            current.copy(captureMode = mode)
+            val newZoom = if (mode == CaptureMode.SUPER_RES_ZOOM) 2.0f else current.zoomRatio
+            current.copy(
+                captureMode = mode,
+                zoomRatio = newZoom
+            )
+        }
+
+        if (mode == CaptureMode.SUPER_RES_ZOOM) {
+            engine.setZoom(2.0f)
         }
     }
 
@@ -226,7 +243,8 @@ class CameraViewModel(
         val isHdrActive: Boolean = current.hdrMode != HdrMode.OFF
         val strategy: CaptureModeStrategy = CaptureModeStrategyFactory.getStrategy(
             mode = current.captureMode,
-            isHdrActive = isHdrActive
+            isHdrActive = isHdrActive,
+            activeArraySize = activeProfile?.activeArraySize
         )
 
         _uiState.update { state: CameraUiState ->
@@ -244,16 +262,17 @@ class CameraViewModel(
                 }
             },
             onComplete = { savedUri: Uri? ->
+                val telemetry = engine.latestTelemetrySummary ?: if (savedUri != null) {
+                    "Mode: ${strategy.mode.name} | Burst ${strategy.burstCount} frames | Saved: ${savedUri.lastPathSegment}"
+                } else {
+                    "Capture sequence failed"
+                }
                 _uiState.update { state: CameraUiState ->
                     state.copy(
                         isCapturing = false,
                         captureProgress = 0.0f,
                         lastCapturedThumbnailUri = savedUri ?: state.lastCapturedThumbnailUri,
-                        telemetrySummary = if (savedUri != null) {
-                            "Burst ${strategy.burstCount} frames | Saved: ${savedUri.lastPathSegment}"
-                        } else {
-                            "Capture sequence failed"
-                        }
+                        telemetrySummary = telemetry
                     )
                 }
             }

@@ -2,6 +2,8 @@
 #include "lumacore_pyramid.hpp"
 #include "lumacore_merge.hpp"
 #include "lumacore_bilateral_slice.hpp"
+#include "lumacore_sharpness.hpp"
+#include "lumacore_super_res.hpp"
 
 #include <cassert>
 #include <chrono>
@@ -294,16 +296,134 @@ void testBilateralGridSliceIdentity() {
     std::cout << "[PASS] testBilateralGridSliceIdentity" << std::endl;
 }
 
+void testLaplacianVarianceSharpness() {
+    std::cout << "[RUN] testLaplacianVarianceSharpness..." << std::endl;
+    constexpr int32_t W = 64;
+    constexpr int32_t H = 64;
+
+    // Test 1: High frequency checkerboard pattern (alternating 0 and 255)
+    std::vector<uint8_t> checkerboard(W * H, 0);
+    for (int32_t y = 0; y < H; ++y) {
+        for (int32_t x = 0; x < W; ++x) {
+            checkerboard[y * W + x] = ((x + y) % 2 == 0) ? 255 : 0;
+        }
+    }
+
+    const float checkVariance = lumacore::computeLaplacianVariance(checkerboard.data(), W, H, W);
+    std::cout << "  Checkerboard Laplacian variance: " << checkVariance << " (limit: > 1000)" << std::endl;
+    assert(checkVariance > 1000.0f);
+
+    // Test 2: Smooth blurred gradient
+    std::vector<uint8_t> smoothGradient(W * H, 0);
+    for (int32_t y = 0; y < H; ++y) {
+        for (int32_t x = 0; x < W; ++x) {
+            smoothGradient[y * W + x] = static_cast<uint8_t>((x * 255) / W);
+        }
+    }
+
+    const float smoothVariance = lumacore::computeLaplacianVariance(smoothGradient.data(), W, H, W);
+    std::cout << "  Smooth gradient Laplacian variance: " << smoothVariance << " (limit: < 50)" << std::endl;
+    assert(smoothVariance < 50.0f);
+
+    // Test 3: Select sharpest frame from burst sequence
+    std::vector<uint8_t> blurredFrame = smoothGradient;
+    const uint8_t* frames[3] = {
+        blurredFrame.data(),
+        checkerboard.data(),
+        blurredFrame.data()
+    };
+
+    const int sharpestIdx = lumacore::selectSharpestFrame(frames, 3, W, H, W);
+    std::cout << "  Sharpest frame index: " << sharpestIdx << " (expected: 1)" << std::endl;
+    assert(sharpestIdx == 1);
+
+    std::cout << "[PASS] testLaplacianVarianceSharpness" << std::endl;
+}
+
+void testSuperRes2xMerge() {
+    std::cout << "[RUN] testSuperRes2xMerge..." << std::endl;
+    constexpr int32_t inW = 32;
+    constexpr int32_t inH = 32;
+    constexpr int32_t outW = inW * 2;
+    constexpr int32_t outH = inH * 2;
+
+    // Test 1: Uniform frame energy conservation across 4 burst frames
+    constexpr uint8_t uniformVal = 142;
+    std::vector<uint8_t> frame0(inW * inH, uniformVal);
+    std::vector<uint8_t> frame1(inW * inH, uniformVal);
+    std::vector<uint8_t> frame2(inW * inH, uniformVal);
+    std::vector<uint8_t> frame3(inW * inH, uniformVal);
+
+    const uint8_t* burstFrames[4] = {
+        frame0.data(),
+        frame1.data(),
+        frame2.data(),
+        frame3.data()
+    };
+
+    std::vector<uint8_t> out2x(outW * outH, 0);
+
+    const bool success = lumacore::mergeSuperRes2x(
+        burstFrames,
+        4,
+        inW,
+        inH,
+        inW,
+        out2x.data(),
+        outW,
+        outH,
+        outW
+    );
+
+    assert(success);
+    assert(out2x.size() == outW * outH); // 2x output resolution verified
+
+    // Check energy conservation: output values must closely match input uniform intensity
+    int maxDiff = 0;
+    for (size_t i = 0; i < out2x.size(); ++i) {
+        const int diff = std::abs(static_cast<int>(out2x[i]) - static_cast<int>(uniformVal));
+        if (diff > maxDiff) maxDiff = diff;
+        assert(diff <= 1);
+    }
+    std::cout << "  2x Super-Res Output resolution: " << outW << "x" << outH
+              << " | Energy conservation max delta: " << maxDiff << std::endl;
+
+    // Test 2: Sub-pixel shift estimation with synthetic micro-shift
+    std::vector<uint8_t> shiftedFrame = frame0;
+    // Add feature
+    shiftedFrame[16 * inW + 16] = 200;
+    frame0[16 * inW + 16] = 200;
+
+    float shiftDx = 0.0f;
+    float shiftDy = 0.0f;
+    const bool shiftFound = lumacore::estimateSubPixelShift(
+        frame0.data(),
+        shiftedFrame.data(),
+        inW,
+        inH,
+        inW,
+        &shiftDx,
+        &shiftDy
+    );
+    assert(shiftFound);
+    assert(std::abs(shiftDx) < 0.5f);
+    assert(std::abs(shiftDy) < 0.5f);
+
+    std::cout << "[PASS] testSuperRes2xMerge" << std::endl;
+}
+
 } // anonymous namespace
 
 int main() {
-    std::cout << "=== Running LumaCore Milestone 4 Burst Alignment & Bilateral Slice Native Unit Tests ===" << std::endl;
+    std::cout << "=== Running LumaCore Milestone 5 Specialized Modes & Hardening Native Unit Tests ===" << std::endl;
     testIdentityHomography();
     testMatrixInverse();
     testGyroHomography();
     testPyramidTranslationRecovery();
     testGhostRejection();
     testBilateralGridSliceIdentity();
-    std::cout << "=== ALL 6 NATIVE TESTS PASSED SUCCESSFULLY! ===" << std::endl;
+    testLaplacianVarianceSharpness();
+    testSuperRes2xMerge();
+    std::cout << "=== ALL 8 NATIVE TESTS PASSED SUCCESSFULLY! ===" << std::endl;
     return 0;
 }

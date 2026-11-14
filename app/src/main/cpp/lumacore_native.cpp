@@ -2,6 +2,8 @@
 #include "lumacore_pyramid.hpp"
 #include "lumacore_merge.hpp"
 #include "lumacore_bilateral_slice.hpp"
+#include "lumacore_sharpness.hpp"
+#include "lumacore_super_res.hpp"
 
 #include <jni.h>
 #include <android/log.h>
@@ -15,7 +17,7 @@
 
 namespace lumacore {
 
-constexpr const char* VERSION_STRING = "1.0.0-milestone4";
+constexpr const char* VERSION_STRING = "1.0.0-milestone5";
 
 class NativeEngine {
 public:
@@ -352,6 +354,131 @@ Java_com_lumacore_camera_core_nativebridge_NativePipeline_nativeSliceBilateralGr
 
     env->ReleaseFloatArrayElements(gridData, gridPtr, JNI_ABORT);
     return JNI_TRUE;
+}
+
+JNIEXPORT jfloat JNICALL
+Java_com_lumacore_camera_core_nativebridge_NativePipeline_nativeComputeLaplacianVariance(
+    JNIEnv* env,
+    jobject /* thiz */,
+    jobject lumaBuffer,
+    jint width,
+    jint height,
+    jint stride
+) {
+    if (env == nullptr || lumaBuffer == nullptr || width < 3 || height < 3 || stride < width) {
+        return 0.0f;
+    }
+    const uint8_t* lumaPtr = static_cast<const uint8_t*>(env->GetDirectBufferAddress(lumaBuffer));
+    if (lumaPtr == nullptr) {
+        LOGE("nativeComputeLaplacianVariance: lumaBuffer is not a direct buffer or is null");
+        return 0.0f;
+    }
+    return static_cast<jfloat>(lumacore::computeLaplacianVariance(lumaPtr, width, height, stride));
+}
+
+JNIEXPORT jint JNICALL
+Java_com_lumacore_camera_core_nativebridge_NativePipeline_nativeSelectSharpestFrame(
+    JNIEnv* env,
+    jobject /* thiz */,
+    jobjectArray lumaPlanes,
+    jint width,
+    jint height,
+    jint stride
+) {
+    if (env == nullptr || lumaPlanes == nullptr || width < 3 || height < 3) {
+        return 0;
+    }
+    const jsize count = env->GetArrayLength(lumaPlanes);
+    if (count <= 0) {
+        return 0;
+    }
+
+    std::vector<const uint8_t*> framePtrs(static_cast<size_t>(count), nullptr);
+    std::vector<jobject> localRefs(static_cast<size_t>(count), nullptr);
+
+    for (jsize i = 0; i < count; ++i) {
+        localRefs[i] = env->GetObjectArrayElement(lumaPlanes, i);
+        if (localRefs[i] != nullptr) {
+            framePtrs[i] = static_cast<const uint8_t*>(env->GetDirectBufferAddress(localRefs[i]));
+        }
+    }
+
+    const int bestIdx = lumacore::selectSharpestFrame(
+        framePtrs.data(),
+        static_cast<int>(count),
+        width,
+        height,
+        stride
+    );
+
+    for (jsize i = 0; i < count; ++i) {
+        if (localRefs[i] != nullptr) {
+            env->DeleteLocalRef(localRefs[i]);
+        }
+    }
+
+    return static_cast<jint>(bestIdx);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_lumacore_camera_core_nativebridge_NativePipeline_nativeMergeSuperRes2x(
+    JNIEnv* env,
+    jobject /* thiz */,
+    jobjectArray yPlanes,
+    jint inWidth,
+    jint inHeight,
+    jint inStride,
+    jobject out2xYBuffer,
+    jint outWidth,
+    jint outHeight,
+    jint outStride
+) {
+    if (env == nullptr || yPlanes == nullptr || out2xYBuffer == nullptr ||
+        inWidth < 8 || inHeight < 8 || outWidth < inWidth || outHeight < inHeight) {
+        LOGE("nativeMergeSuperRes2x: Invalid arguments passed");
+        return JNI_FALSE;
+    }
+
+    const jsize count = env->GetArrayLength(yPlanes);
+    if (count <= 0) {
+        return JNI_FALSE;
+    }
+
+    uint8_t* out2xYPtr = static_cast<uint8_t*>(env->GetDirectBufferAddress(out2xYBuffer));
+    if (out2xYPtr == nullptr) {
+        LOGE("nativeMergeSuperRes2x: out2xYBuffer is not direct");
+        return JNI_FALSE;
+    }
+
+    std::vector<const uint8_t*> framePtrs(static_cast<size_t>(count), nullptr);
+    std::vector<jobject> localRefs(static_cast<size_t>(count), nullptr);
+
+    for (jsize i = 0; i < count; ++i) {
+        localRefs[i] = env->GetObjectArrayElement(yPlanes, i);
+        if (localRefs[i] != nullptr) {
+            framePtrs[i] = static_cast<const uint8_t*>(env->GetDirectBufferAddress(localRefs[i]));
+        }
+    }
+
+    const bool success = lumacore::mergeSuperRes2x(
+        framePtrs.data(),
+        static_cast<int>(count),
+        inWidth,
+        inHeight,
+        inStride,
+        out2xYPtr,
+        outWidth,
+        outHeight,
+        outStride
+    );
+
+    for (jsize i = 0; i < count; ++i) {
+        if (localRefs[i] != nullptr) {
+            env->DeleteLocalRef(localRefs[i]);
+        }
+    }
+
+    return success ? JNI_TRUE : JNI_FALSE;
 }
 
 } // extern "C"

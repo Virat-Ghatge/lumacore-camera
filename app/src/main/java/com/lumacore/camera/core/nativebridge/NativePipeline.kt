@@ -63,4 +63,29 @@ object NativePipeline {
         gridWidth: Int,
         outBuffer: ByteBuffer
     ): Boolean
+
+    external fun nativeComputeLaplacianVariance(
+        lumaBuffer: ByteBuffer,
+        width: Int,
+        height: Int,
+        stride: Int
+    ): Float
+
+    external fun nativeSelectSharpestFrame(
+        lumaPlanes: Array<ByteBuffer>,
+        width: Int,
+        height: Int,
+        stride: Int
+    ): Int
+
+    external fun nativeMergeSuperRes2x(
+        yPlanes: Array<ByteBuffer>,
+        inWidth: Int,
+        inHeight: Int,
+        inStride: Int,
+        out2xY: ByteBuffer,
+        outWidth: Int,
+        outHeight: Int,
+        outStride: Int
+    ): Boolean
 }

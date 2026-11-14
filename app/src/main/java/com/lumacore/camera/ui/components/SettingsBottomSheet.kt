@@ -16,6 +16,7 @@ import androidx.compose.material.icons.rounded.GridOn
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.Speed
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -108,7 +109,12 @@ fun SettingsBottomSheet(
             HorizontalDivider(color = Color(0x22FFFFFF))
             Spacer(modifier = Modifier.height(16.dp))
 
-            // 4. About Neural Engine
+            // 4. Mode Capabilities Breakdown
+            ModeCapabilitiesCard()
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // 5. About Neural Engine
             AboutNeuralEngineCard()
         }
     }
@@ -136,15 +142,29 @@ private fun HardwareTierCard(
                 modifier = Modifier.size(24.dp)
             )
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Hardware Processing Tier",
-                    color = WhiteMuted,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Medium
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Hardware Processing Tier",
+                        color = WhiteMuted,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = uiState.hardwareTier.name,
+                        color = GoldAccent,
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Spacer(modifier = Modifier.height(2.dp))
                 Text(
                     text = uiState.hardwareTier.displayName,
-                    color = GoldAccent,
+                    color = White,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold
                 )
@@ -157,6 +177,94 @@ private fun HardwareTierCard(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun ModeCapabilitiesCard() {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(DarkSurfaceElevated)
+            .padding(14.dp)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Tune,
+                contentDescription = null,
+                tint = GoldAccent,
+                modifier = Modifier.size(18.dp)
+            )
+            Text(
+                text = "Specialized Mode Capabilities",
+                color = White,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        Spacer(modifier = Modifier.height(10.dp))
+
+        ModeCapabilityRow(
+            name = "PHOTO",
+            spec = "1-3 frames HDR",
+            desc = "Zero-shutter-lag with OEM edge & noise reduction bypass"
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        ModeCapabilityRow(
+            name = "NIGHT",
+            spec = "8 frames burst",
+            desc = "Exposure bracketing (-1.5 EV to +1.5 EV) & deep shadow lifting"
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        ModeCapabilityRow(
+            name = "ACTION",
+            spec = "6 frames anti-blur",
+            desc = "High shutter speed (<= 1/100s) & Laplacian variance sharpest frame selection"
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        ModeCapabilityRow(
+            name = "ZOOM+ (2x)",
+            spec = "6 frames super-res",
+            desc = "Sub-pixel micro-displacement estimation & bilateral Lanczos splatting"
+        )
+    }
+}
+
+@Composable
+private fun ModeCapabilityRow(
+    name: String,
+    spec: String,
+    desc: String
+) {
+    Column {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = name,
+                color = GoldAccent,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                text = spec,
+                color = WhiteMuted,
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace
+            )
+        }
+        Text(
+            text = desc,
+            color = WhiteSecondary,
+            fontSize = 11.sp,
+            lineHeight = 15.sp
+        )
     }
 }
 

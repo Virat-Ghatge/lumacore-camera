@@ -14,6 +14,8 @@ add_library(
     lumacore_pyramid.cpp
     lumacore_merge.cpp
     lumacore_bilateral_slice.cpp
+    lumacore_sharpness.cpp
+    lumacore_super_res.cpp
 )
 
 find_library(log-lib log)
@@ -35,6 +37,8 @@ add_executable(
     lumacore_pyramid.cpp
     lumacore_merge.cpp
     lumacore_bilateral_slice.cpp
+    lumacore_sharpness.cpp
+    lumacore_super_res.cpp
 )
 
 target_link_libraries(

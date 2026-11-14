@@ -58,7 +58,7 @@ class Camera2CaptureEngine(
     private val cameraHandler: Handler = Handler(cameraThread.looper)
 
     private val engineScope: CoroutineScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-    val ringBuffer: BoundedImageRingBuffer = BoundedImageRingBuffer(maxCapacity = 3)
+    val ringBuffer: BoundedImageRingBuffer = BoundedImageRingBuffer(maxCapacity = 10)
     private val gyroSampler: GyroscopeSampler = GyroscopeSampler(context)
     private val onnxEngine: BilateralGridInferenceEngine = BilateralGridInferenceEngine(context)
     private val glUpsampler: GlesBilateralUpsampler = GlesBilateralUpsampler(context)
@@ -105,7 +105,7 @@ class Camera2CaptureEngine(
             }
 
             val binnedSize = profile.binnedCaptureSize
-            val imageReader = ImageReader.newInstance(binnedSize.width, binnedSize.height, captureFormat, 4)
+            val imageReader = ImageReader.newInstance(binnedSize.width, binnedSize.height, captureFormat, 10)
             imageReader.setOnImageAvailableListener({ reader: ImageReader ->
                 val image: Image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
                 ringBuffer.addImage(image)
@@ -406,10 +406,10 @@ class Camera2CaptureEngine(
             if (frames.size == 1 || !NativePipeline.isNativeReady() || frames[0].format != ImageFormat.YUV_420_888) {
                 // Select primary frame for direct single frame enhance & save
                 val selectedFrame: Image = frames[frames.size / 2]
-                savedUri = processSingleFrameAndSave(selectedFrame, orientation)
+                savedUri = processSingleFrameAndSave(selectedFrame, strategy, orientation)
             } else {
-                // Multi-frame burst fusion with C++20 gyro-assisted pyramid alignment & temporal merging
-                savedUri = mergeBurstFramesAndSave(frames, orientation)
+                // Multi-frame burst fusion with specialized mode pipeline
+                savedUri = mergeBurstFramesAndSave(frames, strategy, orientation)
             }
 
             // Safely close every drained frame
@@ -434,6 +434,7 @@ class Camera2CaptureEngine(
 
     private suspend fun processSingleFrameAndSave(
         frame: Image,
+        strategy: CaptureModeStrategy,
         orientationDegrees: Int
     ): Uri? {
         val jpegBytes = when (frame.format) {
@@ -462,8 +463,11 @@ class Camera2CaptureEngine(
         val enhancedBitmap = enhanceResult.enhancedBitmap
         val glMs = enhanceResult.executionMs
 
-        val tier = hardwareProfile?.tier?.displayName ?: "UNIVERSAL_YUV"
-        val telemetry = "Tier: $tier | Align: 0.0ms | Merge: 0.0ms | ONNX: ${onnxMs}ms | GL: ${glMs}ms | Ghost: 0.0%"
+        val tier = hardwareProfile?.tier?.name ?: "TIER_2_YUV_FAST"
+        val totalMem = Runtime.getRuntime().totalMemory()
+        val freeMem = Runtime.getRuntime().freeMemory()
+        val usedRamMb = (totalMem - freeMem) / (1024 * 1024)
+        val telemetry = "Mode: ${strategy.mode.name} | Tier: $tier | Align: 0.0ms | Merge: 0.0ms | ONNX: ${String.format(Locale.US, "%.1f", onnxMs)}ms | GL: ${String.format(Locale.US, "%.1f", glMs)}ms | Ghost: 0.0% | RAM: ${usedRamMb}MB"
         Log.i(TAG, telemetry)
         latestTelemetrySummary = telemetry
 
@@ -482,65 +486,179 @@ class Camera2CaptureEngine(
     }
 
     private suspend fun mergeBurstFramesAndSave(
-        frames: List<Image>,
+        rawFrames: List<Image>,
+        strategy: CaptureModeStrategy,
         orientationDegrees: Int
     ): Uri? {
-        val frameCount = frames.size
-        val width = frames[0].width
-        val height = frames[0].height
+        val frameCount = rawFrames.size
+        val width = rawFrames[0].width
+        val height = rawFrames[0].height
 
-        val yRowStride = frames[0].planes[0].rowStride
-        val uvRowStride = frames[0].planes[1].rowStride
-        val uvPixelStride = frames[0].planes[1].pixelStride
+        val yRowStride = rawFrames[0].planes[0].rowStride
+        val uvRowStride = rawFrames[0].planes[1].rowStride
+        val uvPixelStride = rawFrames[0].planes[1].pixelStride
 
-        val yPlanes = Array(frameCount) { i ->
-            frames[i].planes[0].buffer.rewind()
-            frames[i].planes[0].buffer
-        }
-        val uPlanes = Array(frameCount) { i ->
-            frames[i].planes[1].buffer.rewind()
-            frames[i].planes[1].buffer
-        }
-        val vPlanes = Array(frameCount) { i ->
-            frames[i].planes[2].buffer.rewind()
-            frames[i].planes[2].buffer
-        }
-
-        val refTimestampNs = frames[0].timestamp
-        val gyroRotations = FloatArray((frameCount - 1) * 3)
-
-        for (k in 1 until frameCount) {
-            val targetTimestampNs = frames[k].timestamp
-            val rot = gyroSampler.integrateRotationBetween(refTimestampNs, targetTimestampNs)
-            val baseIdx = (k - 1) * 3
-            gyroRotations[baseIdx + 0] = rot[0]
-            gyroRotations[baseIdx + 1] = rot[1]
-            gyroRotations[baseIdx + 2] = rot[2]
+        // Action Anti-Blur Mode: Select sharpest frame as reference
+        val frames: List<Image> = if (strategy.mode == com.lumacore.camera.core.model.CaptureMode.ACTION && frameCount > 1) {
+            val yBuffers = Array(frameCount) { i ->
+                rawFrames[i].planes[0].buffer.rewind()
+                rawFrames[i].planes[0].buffer
+            }
+            val sharpestIndex = NativePipeline.nativeSelectSharpestFrame(
+                lumaPlanes = yBuffers,
+                width = width,
+                height = height,
+                stride = yRowStride
+            )
+            Log.i(TAG, "Action Anti-Blur: Frame $sharpestIndex selected as sharpest reference")
+            if (sharpestIndex > 0 && sharpestIndex < frameCount) {
+                listOf(rawFrames[sharpestIndex]) + rawFrames.filterIndexed { index, _ -> index != sharpestIndex }
+            } else {
+                rawFrames
+            }
+        } else {
+            rawFrames
         }
 
-        val outY = ByteBuffer.allocateDirect(width * height)
-        val outU = ByteBuffer.allocateDirect((width / 2) * (height / 2))
-        val outV = ByteBuffer.allocateDirect((width / 2) * (height / 2))
+        val outY: ByteBuffer
+        val outU: ByteBuffer
+        val outV: ByteBuffer
+        var alignMs = 0.0f
+        var mergeMs = 0.0f
+        var ghostRatio = 0.0f
 
-        val stats = NativePipeline.nativeAlignAndMergeBurst(
-            yPlanes = yPlanes,
-            uPlanes = uPlanes,
-            vPlanes = vPlanes,
-            width = width,
-            height = height,
-            yRowStride = yRowStride,
-            uvRowStride = uvRowStride,
-            uvPixelStride = uvPixelStride,
-            gyroRotations = gyroRotations,
-            outY = outY,
-            outU = outU,
-            outV = outV
-        )
+        if (strategy.mode == com.lumacore.camera.core.model.CaptureMode.SUPER_RES_ZOOM || currentZoomRatio >= 1.9f) {
+            // 2x Super-Resolution sub-pixel burst merge
+            val cropW = (width / 2) and 1.inv()
+            val cropH = (height / 2) and 1.inv()
+            val cropX = (width - cropW) / 2
+            val cropY = (height - cropH) / 2
 
-        val alignMs = stats.getOrNull(0) ?: 0.0f
-        val mergeMs = stats.getOrNull(1) ?: 0.0f
-        val ghostRatio = (stats.getOrNull(2) ?: 0.0f) * 100.0f
-        val mergedCount = stats.getOrNull(3)?.toInt() ?: frameCount
+            val cropYBuffers = Array(frameCount) { i ->
+                val buf = ByteBuffer.allocateDirect(cropW * cropH)
+                val srcBuf = frames[i].planes[0].buffer
+                srcBuf.rewind()
+                for (r in 0 until cropH) {
+                    srcBuf.position((cropY + r) * yRowStride + cropX)
+                    val row = ByteArray(cropW)
+                    srcBuf.get(row)
+                    buf.put(row)
+                }
+                buf.rewind()
+                buf
+            }
+
+            outY = ByteBuffer.allocateDirect(width * height)
+            val superResStart = System.currentTimeMillis()
+            val success = NativePipeline.nativeMergeSuperRes2x(
+                yPlanes = cropYBuffers,
+                inWidth = cropW,
+                inHeight = cropH,
+                inStride = cropW,
+                out2xY = outY,
+                outWidth = width,
+                outHeight = height,
+                outStride = width
+            )
+            mergeMs = (System.currentTimeMillis() - superResStart).toFloat()
+            if (!success) {
+                Log.w(TAG, "nativeMergeSuperRes2x returned false, falling back to direct copy")
+            }
+
+            // Upsample Chroma (U and V) center crop 2x to fill (width/2) x (height/2)
+            val halfW = width / 2
+            val halfH = height / 2
+            val cropHalfW = cropW / 2
+            val cropHalfH = cropH / 2
+            val cropHalfX = cropX / 2
+            val cropHalfY = cropY / 2
+
+            outU = ByteBuffer.allocateDirect(halfW * halfH)
+            outV = ByteBuffer.allocateDirect(halfW * halfH)
+
+            val refU = frames[0].planes[1].buffer
+            val refV = frames[0].planes[2].buffer
+            refU.rewind()
+            refV.rewind()
+
+            for (r in 0 until halfH) {
+                val srcR = (r * cropHalfH) / halfH
+                for (c in 0 until halfW) {
+                    val srcC = (c * cropHalfW) / halfW
+                    val idx = (cropHalfY + srcR) * uvRowStride + (cropHalfX + srcC) * uvPixelStride
+                    outU.put(refU.get(idx))
+                    outV.put(refV.get(idx))
+                }
+            }
+            outU.rewind()
+            outV.rewind()
+            outY.rewind()
+        } else {
+            // Standard / Night / Action Gyro-Assisted Pyramid Burst Fusion
+            val yPlanes = Array(frameCount) { i ->
+                frames[i].planes[0].buffer.rewind()
+                frames[i].planes[0].buffer
+            }
+            val uPlanes = Array(frameCount) { i ->
+                frames[i].planes[1].buffer.rewind()
+                frames[i].planes[1].buffer
+            }
+            val vPlanes = Array(frameCount) { i ->
+                frames[i].planes[2].buffer.rewind()
+                frames[i].planes[2].buffer
+            }
+
+            val refTimestampNs = frames[0].timestamp
+            val gyroRotations = FloatArray((frameCount - 1) * 3)
+
+            for (k in 1 until frameCount) {
+                val targetTimestampNs = frames[k].timestamp
+                val rot = gyroSampler.integrateRotationBetween(refTimestampNs, targetTimestampNs)
+                val baseIdx = (k - 1) * 3
+                gyroRotations[baseIdx + 0] = rot[0]
+                gyroRotations[baseIdx + 1] = rot[1]
+                gyroRotations[baseIdx + 2] = rot[2]
+            }
+
+            outY = ByteBuffer.allocateDirect(width * height)
+            outU = ByteBuffer.allocateDirect((width / 2) * (height / 2))
+            outV = ByteBuffer.allocateDirect((width / 2) * (height / 2))
+
+            val stats = NativePipeline.nativeAlignAndMergeBurst(
+                yPlanes = yPlanes,
+                uPlanes = uPlanes,
+                vPlanes = vPlanes,
+                width = width,
+                height = height,
+                yRowStride = yRowStride,
+                uvRowStride = uvRowStride,
+                uvPixelStride = uvPixelStride,
+                gyroRotations = gyroRotations,
+                outY = outY,
+                outU = outU,
+                outV = outV
+            )
+
+            alignMs = stats.getOrNull(0) ?: 0.0f
+            mergeMs = stats.getOrNull(1) ?: 0.0f
+            ghostRatio = (stats.getOrNull(2) ?: 0.0f) * 100.0f
+
+            // Night Mode: Deep shadow lifting tone curve on planar luma
+            if (strategy.mode == com.lumacore.camera.core.model.CaptureMode.NIGHT) {
+                outY.rewind()
+                val yBytes = ByteArray(width * height)
+                outY.get(yBytes)
+                for (i in yBytes.indices) {
+                    val luma = yBytes[i].toInt() and 0xFF
+                    val norm = luma / 255.0f
+                    val lifted = (Math.pow(norm.toDouble(), 0.82) * 255.0).toInt().coerceIn(0, 255)
+                    yBytes[i] = lifted.toByte()
+                }
+                outY.rewind()
+                outY.put(yBytes)
+                outY.rewind()
+            }
+        }
 
         val jpegBytes = MediaSaver.convertPlanarYuvToJpegBytes(
             outY = outY,
@@ -550,12 +668,16 @@ class Camera2CaptureEngine(
             height = height
         )
 
+        val totalMem = Runtime.getRuntime().totalMemory()
+        val freeMem = Runtime.getRuntime().freeMemory()
+        val usedRamMb = (totalMem - freeMem) / (1024 * 1024)
+        val tier = hardwareProfile?.tier?.name ?: "TIER_1_RAW_BURST"
+
         val decodeOptions = BitmapFactory.Options().apply { inMutable = true }
         val mergedBitmap = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size, decodeOptions)
 
         if (mergedBitmap == null) {
-            val tier = hardwareProfile?.tier?.displayName ?: "RAW_BURST"
-            val fallbackTelemetry = "Tier: $tier | Align: ${String.format(Locale.US, "%.1f", alignMs)}ms | Merge: ${String.format(Locale.US, "%.1f", mergeMs)}ms | Ghost: ${String.format(Locale.US, "%.1f", ghostRatio)}%"
+            val fallbackTelemetry = "Mode: ${strategy.mode.name} | Tier: $tier | Align: ${String.format(Locale.US, "%.1f", alignMs)}ms | Merge: ${String.format(Locale.US, "%.1f", mergeMs)}ms | ONNX: 0.0ms | GL: 0.0ms | Ghost: ${String.format(Locale.US, "%.1f", ghostRatio)}% | RAM: ${usedRamMb}MB"
             Log.i(TAG, fallbackTelemetry)
             latestTelemetrySummary = fallbackTelemetry
             return MediaSaver.saveJpeg(
@@ -574,8 +696,7 @@ class Camera2CaptureEngine(
         val enhancedBitmap = enhanceResult.enhancedBitmap
         val glMs = enhanceResult.executionMs
 
-        val tier = hardwareProfile?.tier?.displayName ?: "RAW_BURST"
-        val telemetry = "Tier: $tier | Align: ${String.format(Locale.US, "%.1f", alignMs)}ms | Merge: ${String.format(Locale.US, "%.1f", mergeMs)}ms | ONNX: ${onnxMs}ms | GL: ${glMs}ms | Ghost: ${String.format(Locale.US, "%.1f", ghostRatio)}%"
+        val telemetry = "Mode: ${strategy.mode.name} | Tier: $tier | Align: ${String.format(Locale.US, "%.1f", alignMs)}ms | Merge: ${String.format(Locale.US, "%.1f", mergeMs)}ms | ONNX: ${String.format(Locale.US, "%.1f", onnxMs)}ms | GL: ${String.format(Locale.US, "%.1f", glMs)}ms | Ghost: ${String.format(Locale.US, "%.1f", ghostRatio)}% | RAM: ${usedRamMb}MB"
         Log.i(TAG, telemetry)
         latestTelemetrySummary = telemetry
 

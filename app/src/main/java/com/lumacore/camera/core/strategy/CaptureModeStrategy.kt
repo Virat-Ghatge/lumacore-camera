@@ -85,7 +85,8 @@ class PhotoStandardModeStrategy(
 }
 
 /**
- * Low-light burst strategy with multi-frame exposure bracketing (6-8 frames).
+ * Low-light burst strategy with multi-frame exposure bracketing (8 frames).
+ * Brackets exposure from -1.5 EV to +1.5 EV and requests high sensitivity for deep shadow recovery.
  */
 class NightBurstModeStrategy(
     override val burstCount: Int = 8
@@ -103,6 +104,7 @@ class NightBurstModeStrategy(
         builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
         builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
         builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+        builder.set(CaptureRequest.CONTROL_SCENE_MODE, CaptureRequest.CONTROL_SCENE_MODE_NIGHT)
     }
 
     override fun configureCapture(
@@ -118,18 +120,25 @@ class NightBurstModeStrategy(
             builder.set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_FAST)
         }
 
-        // Auto-exposure bracketing offsets: highlight preservation -> neutral midtones -> shadow boost
-        val evOffset = when {
-            frameIndex < totalFrames / 3 -> -2
-            frameIndex < (totalFrames * 2) / 3 -> 0
-            else -> 1
+        // Auto-exposure bracketing sequence from -1.5 EV to +1.5 EV:
+        // Frames 0-1: -2 (highlight preservation)
+        // Frame 2: -1
+        // Frames 3-4: 0 (neutral midtones)
+        // Frame 5: +1
+        // Frames 6-7: +2 (deep shadow lifting)
+        val evOffset = when (frameIndex) {
+            0, 1 -> -2
+            2 -> -1
+            3, 4 -> 0
+            5 -> 1
+            else -> 2
         }
         builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, evOffset)
     }
 }
 
 /**
- * High-speed anti-blur strategy (4-6 frames) prioritizing short shutter durations.
+ * High-speed anti-blur strategy (6 frames) prioritizing short shutter durations (<= 1/100s).
  */
 class ActionAntiBlurModeStrategy(
     override val burstCount: Int = 6
@@ -147,7 +156,7 @@ class ActionAntiBlurModeStrategy(
         builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
         builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
         builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
-        builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(30, 30))
+        builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(30, 60))
     }
 
     override fun configureCapture(
@@ -163,17 +172,25 @@ class ActionAntiBlurModeStrategy(
             builder.set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_FAST)
         }
 
-        // Bias towards fast shutter speed (<= 1/100s) to freeze fast motion
+        // Bias towards fast shutter speed (<= 1/100s = 10,000,000 ns) with ISO boost to freeze fast motion
         builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(30, 60))
         builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, -1)
+        try {
+            // Restrict sensor exposure duration <= 10ms (1/100s)
+            builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, 10_000_000L)
+            builder.set(CaptureRequest.SENSOR_SENSITIVITY, 800)
+        } catch (_: Exception) {
+            // Safely ignored on devices that lock manual sensor settings while AE is ON
+        }
     }
 }
 
 /**
- * Super-resolution multi-frame zoom strategy (4 frames burst with center sampling).
+ * Super-resolution multi-frame zoom strategy (4-6 frames burst with center crop sampling).
  */
 class SuperResZoomModeStrategy(
-    override val burstCount: Int = 4
+    override val burstCount: Int = 6,
+    private val activeArraySize: android.graphics.Rect? = null
 ) : CaptureModeStrategy {
 
     override val mode: CaptureMode = CaptureMode.SUPER_RES_ZOOM
@@ -201,6 +218,16 @@ class SuperResZoomModeStrategy(
         if (tier == HardwareTier.TIER_2_YUV_FAST) {
             builder.set(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_OFF)
             builder.set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_FAST)
+        }
+
+        // Configure 2x center crop region if active array size is available
+        if (activeArraySize != null) {
+            val cropW = activeArraySize.width() / 2
+            val cropH = activeArraySize.height() / 2
+            val cropLeft = (activeArraySize.width() - cropW) / 2
+            val cropTop = (activeArraySize.height() - cropH) / 2
+            val cropRect = android.graphics.Rect(cropLeft, cropTop, cropLeft + cropW, cropTop + cropH)
+            builder.set(CaptureRequest.SCALER_CROP_REGION, cropRect)
         }
     }
 }
@@ -239,12 +266,13 @@ object CaptureModeStrategyFactory {
 
     fun getStrategy(
         mode: CaptureMode,
-        isHdrActive: Boolean = false
+        isHdrActive: Boolean = false,
+        activeArraySize: android.graphics.Rect? = null
     ): CaptureModeStrategy = when (mode) {
         CaptureMode.PHOTO -> PhotoStandardModeStrategy(isHdrActive = isHdrActive)
         CaptureMode.NIGHT -> NightBurstModeStrategy()
         CaptureMode.ACTION -> ActionAntiBlurModeStrategy()
-        CaptureMode.SUPER_RES_ZOOM -> SuperResZoomModeStrategy()
+        CaptureMode.SUPER_RES_ZOOM -> SuperResZoomModeStrategy(activeArraySize = activeArraySize)
         CaptureMode.VIDEO_V2 -> VideoModePlaceholderStrategy()
     }
 }

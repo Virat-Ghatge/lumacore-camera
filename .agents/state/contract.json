@@ -6,18 +6,19 @@
   "verification_depth": "impact",
   "delegation": "conditional",
   "reason_codes": [
-    "milestone-4-onnx-and-gl-upsampling"
+    "milestone-5-specialized-modes-and-hardening"
   ],
   "allowed_write_scope": [
     "app/src/main/cpp",
     "app/src/main/java/com/lumacore/camera/core",
-    "app/src/main/assets",
+    "app/src/main/java/com/lumacore/camera/ui",
     "README.md"
   ],
   "acceptance_criteria": [
-    "ONNX Runtime NNAPI and XNNPACK wrapper implemented",
-    "OpenGL ES 3.0 bilateral slicing shader and renderer implemented",
-    "Full pipeline integration (Burst -> Merge -> ONNX -> GL -> MediaStore)",
+    "Night Mode 8-frame fusion wired",
+    "Action Mode with Laplacian variance sharpest frame selection wired",
+    "2x Super-Resolution sub-pixel merge implemented",
+    "Real-time Telemetry HUD and device hardening verified",
     "assembleDebug passes"
   ],
   "files_read_in_session": [
@@ -36,6 +37,6 @@
     "README.md"
   ],
   "last_mutation_ts": 1794677200.0,
-  "last_verified_ts": 1794676323.4276059,
+  "last_verified_ts": 1794677071.5619817,
   "last_verdict": "PASS"
 }
