@@ -3,6 +3,8 @@ package com.lumacore.camera.core.engine
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.ImageFormat
 import android.graphics.Rect
 import android.hardware.camera2.CameraCaptureSession
@@ -23,11 +25,13 @@ import android.util.Log
 import android.view.Surface
 import androidx.core.content.ContextCompat
 import com.lumacore.camera.core.buffer.BoundedImageRingBuffer
+import com.lumacore.camera.core.gl.GlesBilateralUpsampler
 import com.lumacore.camera.core.hardware.HardwareCapabilityProber
 import com.lumacore.camera.core.hardware.HardwareProfile
 import com.lumacore.camera.core.model.HardwareTier
 import com.lumacore.camera.core.model.LensFacing
 import com.lumacore.camera.core.nativebridge.NativePipeline
+import com.lumacore.camera.core.neural.BilateralGridInferenceEngine
 import com.lumacore.camera.core.sensor.GyroscopeSampler
 import com.lumacore.camera.core.storage.MediaSaver
 import com.lumacore.camera.core.strategy.CaptureModeStrategy
@@ -56,6 +60,8 @@ class Camera2CaptureEngine(
     private val engineScope: CoroutineScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     val ringBuffer: BoundedImageRingBuffer = BoundedImageRingBuffer(maxCapacity = 3)
     private val gyroSampler: GyroscopeSampler = GyroscopeSampler(context)
+    private val onnxEngine: BilateralGridInferenceEngine = BilateralGridInferenceEngine(context)
+    private val glUpsampler: GlesBilateralUpsampler = GlesBilateralUpsampler(context)
     var latestTelemetrySummary: String? = null
 
     private var cameraDevice: CameraDevice? = null
@@ -398,13 +404,9 @@ class Camera2CaptureEngine(
             val savedUri: Uri?
 
             if (frames.size == 1 || !NativePipeline.isNativeReady() || frames[0].format != ImageFormat.YUV_420_888) {
-                // Select primary frame for direct single frame save
+                // Select primary frame for direct single frame enhance & save
                 val selectedFrame: Image = frames[frames.size / 2]
-                savedUri = MediaSaver.saveImage(
-                    context = context,
-                    image = selectedFrame,
-                    orientationDegrees = orientation
-                )
+                savedUri = processSingleFrameAndSave(selectedFrame, orientation)
             } else {
                 // Multi-frame burst fusion with C++20 gyro-assisted pyramid alignment & temporal merging
                 savedUri = mergeBurstFramesAndSave(frames, orientation)
@@ -428,6 +430,55 @@ class Camera2CaptureEngine(
             gyroSampler.stopSampling()
             ringBuffer.releaseShutterLock()
         }
+    }
+
+    private suspend fun processSingleFrameAndSave(
+        frame: Image,
+        orientationDegrees: Int
+    ): Uri? {
+        val jpegBytes = when (frame.format) {
+            ImageFormat.JPEG -> {
+                val buf = frame.planes[0].buffer
+                val bytes = ByteArray(buf.remaining())
+                buf.get(bytes)
+                bytes
+            }
+            ImageFormat.YUV_420_888 -> MediaSaver.convertYuv420ToJpegBytes(frame)
+            else -> null
+        }
+
+        if (jpegBytes == null) {
+            return MediaSaver.saveImage(context, frame, orientationDegrees)
+        }
+
+        val decodeOptions = BitmapFactory.Options().apply { inMutable = true }
+        val bitmap = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size, decodeOptions)
+            ?: return MediaSaver.saveJpeg(context, jpegBytes, orientationDegrees)
+
+        val gridResult = onnxEngine.predictBilateralGrid(bitmap)
+        val onnxMs = gridResult.latencyMs
+
+        val enhanceResult = glUpsampler.enhanceImage(bitmap, gridResult)
+        val enhancedBitmap = enhanceResult.enhancedBitmap
+        val glMs = enhanceResult.executionMs
+
+        val tier = hardwareProfile?.tier?.displayName ?: "UNIVERSAL_YUV"
+        val telemetry = "Tier: $tier | Align: 0.0ms | Merge: 0.0ms | ONNX: ${onnxMs}ms | GL: ${glMs}ms | Ghost: 0.0%"
+        Log.i(TAG, telemetry)
+        latestTelemetrySummary = telemetry
+
+        val savedUri = MediaSaver.saveBitmap(
+            context = context,
+            bitmap = enhancedBitmap,
+            orientationDegrees = orientationDegrees
+        )
+
+        bitmap.recycle()
+        if (enhancedBitmap !== bitmap) {
+            enhancedBitmap.recycle()
+        }
+
+        return savedUri
     }
 
     private suspend fun mergeBurstFramesAndSave(
@@ -491,10 +542,6 @@ class Camera2CaptureEngine(
         val ghostRatio = (stats.getOrNull(2) ?: 0.0f) * 100.0f
         val mergedCount = stats.getOrNull(3)?.toInt() ?: frameCount
 
-        val telemetry = "Burst merged $mergedCount frames | Align: ${String.format(Locale.US, "%.1f", alignMs)}ms | Merge: ${String.format(Locale.US, "%.1f", mergeMs)}ms | Ghost Rejection: ${String.format(Locale.US, "%.1f", ghostRatio)}%"
-        Log.i(TAG, telemetry)
-        latestTelemetrySummary = telemetry
-
         val jpegBytes = MediaSaver.convertPlanarYuvToJpegBytes(
             outY = outY,
             outU = outU,
@@ -503,11 +550,47 @@ class Camera2CaptureEngine(
             height = height
         )
 
-        return MediaSaver.saveJpeg(
+        val decodeOptions = BitmapFactory.Options().apply { inMutable = true }
+        val mergedBitmap = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size, decodeOptions)
+
+        if (mergedBitmap == null) {
+            val tier = hardwareProfile?.tier?.displayName ?: "RAW_BURST"
+            val fallbackTelemetry = "Tier: $tier | Align: ${String.format(Locale.US, "%.1f", alignMs)}ms | Merge: ${String.format(Locale.US, "%.1f", mergeMs)}ms | Ghost: ${String.format(Locale.US, "%.1f", ghostRatio)}%"
+            Log.i(TAG, fallbackTelemetry)
+            latestTelemetrySummary = fallbackTelemetry
+            return MediaSaver.saveJpeg(
+                context = context,
+                jpegBytes = jpegBytes,
+                orientationDegrees = orientationDegrees
+            )
+        }
+
+        // Run neural bilateral grid inference on merged frame
+        val gridResult = onnxEngine.predictBilateralGrid(mergedBitmap)
+        val onnxMs = gridResult.latencyMs
+
+        // Run full-resolution OpenGL ES 3.0 bilateral slicing
+        val enhanceResult = glUpsampler.enhanceImage(mergedBitmap, gridResult)
+        val enhancedBitmap = enhanceResult.enhancedBitmap
+        val glMs = enhanceResult.executionMs
+
+        val tier = hardwareProfile?.tier?.displayName ?: "RAW_BURST"
+        val telemetry = "Tier: $tier | Align: ${String.format(Locale.US, "%.1f", alignMs)}ms | Merge: ${String.format(Locale.US, "%.1f", mergeMs)}ms | ONNX: ${onnxMs}ms | GL: ${glMs}ms | Ghost: ${String.format(Locale.US, "%.1f", ghostRatio)}%"
+        Log.i(TAG, telemetry)
+        latestTelemetrySummary = telemetry
+
+        val savedUri = MediaSaver.saveBitmap(
             context = context,
-            jpegBytes = jpegBytes,
+            bitmap = enhancedBitmap,
             orientationDegrees = orientationDegrees
         )
+
+        mergedBitmap.recycle()
+        if (enhancedBitmap !== mergedBitmap) {
+            enhancedBitmap.recycle()
+        }
+
+        return savedUri
     }
 
     /**
@@ -553,6 +636,8 @@ class Camera2CaptureEngine(
         closeCamera()
         gyroSampler.stopSampling()
         ringBuffer.close()
+        onnxEngine.close()
+        glUpsampler.close()
         cameraThread.quitSafely()
     }
 

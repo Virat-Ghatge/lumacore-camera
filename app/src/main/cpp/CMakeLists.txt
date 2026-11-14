@@ -13,6 +13,7 @@ add_library(
     lumacore_homography.cpp
     lumacore_pyramid.cpp
     lumacore_merge.cpp
+    lumacore_bilateral_slice.cpp
 )
 
 find_library(log-lib log)
@@ -33,6 +34,7 @@ add_executable(
     lumacore_homography.cpp
     lumacore_pyramid.cpp
     lumacore_merge.cpp
+    lumacore_bilateral_slice.cpp
 )
 
 target_link_libraries(

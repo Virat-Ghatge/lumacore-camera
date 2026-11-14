@@ -6,29 +6,36 @@
   "verification_depth": "impact",
   "delegation": "conditional",
   "reason_codes": [
-    "milestone-3-cpp20-burst-alignment"
+    "milestone-4-onnx-and-gl-upsampling"
   ],
   "allowed_write_scope": [
     "app/src/main/cpp",
     "app/src/main/java/com/lumacore/camera/core",
+    "app/src/main/assets",
     "README.md"
   ],
   "acceptance_criteria": [
-    "C++20 Gyro Homography computation implemented",
-    "3-Level Gaussian Pyramid L1 block matching implemented",
-    "Ghost rejection temporal merging implemented",
-    "JNI bridge and GyroscopeSampler wired",
-    "assembleDebug and native compilation pass"
+    "ONNX Runtime NNAPI and XNNPACK wrapper implemented",
+    "OpenGL ES 3.0 bilateral slicing shader and renderer implemented",
+    "Full pipeline integration (Burst -> Merge -> ONNX -> GL -> MediaStore)",
+    "assembleDebug passes"
   ],
   "files_read_in_session": [
     "app/src/main/cpp/CMakeLists.txt",
     "app/src/main/cpp/lumacore_native.cpp",
+    "app/src/main/cpp/test_burst_align.cpp",
+    "app/src/main/cpp/lumacore_bilateral_slice.hpp",
+    "app/src/main/cpp/lumacore_bilateral_slice.cpp",
     "app/src/main/java/com/lumacore/camera/core/nativebridge/NativePipeline.kt",
+    "app/src/main/java/com/lumacore/camera/core/neural/BilateralGridInferenceEngine.kt",
+    "app/src/main/java/com/lumacore/camera/core/gl/GlesBilateralUpsampler.kt",
     "app/src/main/java/com/lumacore/camera/core/engine/Camera2CaptureEngine.kt",
     "app/src/main/java/com/lumacore/camera/core/storage/MediaSaver.kt",
+    "app/src/main/assets/shaders/bilateral_slice.vert",
+    "app/src/main/assets/shaders/bilateral_slice.frag",
     "README.md"
   ],
   "last_mutation_ts": 1794677200.0,
-  "last_verified_ts": 1794675640.7780569,
+  "last_verified_ts": 1794676323.4276059,
   "last_verdict": "PASS"
 }

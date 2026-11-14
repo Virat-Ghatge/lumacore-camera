@@ -1,6 +1,7 @@
 #include "lumacore_homography.hpp"
 #include "lumacore_pyramid.hpp"
 #include "lumacore_merge.hpp"
+#include "lumacore_bilateral_slice.hpp"
 
 #include <jni.h>
 #include <android/log.h>
@@ -14,7 +15,7 @@
 
 namespace lumacore {
 
-constexpr const char* VERSION_STRING = "1.0.0-milestone3";
+constexpr const char* VERSION_STRING = "1.0.0-milestone4";
 
 class NativeEngine {
 public:
@@ -294,6 +295,63 @@ Java_com_lumacore_camera_core_nativebridge_NativePipeline_nativeAlignAndMergeBur
         env->SetFloatArrayRegion(result, 0, 4, returnStats);
     }
     return result;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_lumacore_camera_core_nativebridge_NativePipeline_nativeSliceBilateralGrid(
+    JNIEnv* env,
+    jobject /* thiz */,
+    jobject inBuffer,
+    jint width,
+    jint height,
+    jint pixelStride,
+    jfloatArray gridData,
+    jint gridDepth,
+    jint gridH,
+    jint gridW,
+    jobject outBuffer
+) {
+    if (env == nullptr || inBuffer == nullptr || outBuffer == nullptr || gridData == nullptr ||
+        width <= 0 || height <= 0 || (pixelStride != 3 && pixelStride != 4) ||
+        gridDepth <= 0 || gridH <= 0 || gridW <= 0) {
+        LOGE("nativeSliceBilateralGrid: Invalid arguments passed");
+        return JNI_FALSE;
+    }
+
+    uint8_t* inPtr = static_cast<uint8_t*>(env->GetDirectBufferAddress(inBuffer));
+    uint8_t* outPtr = static_cast<uint8_t*>(env->GetDirectBufferAddress(outBuffer));
+    if (inPtr == nullptr || outPtr == nullptr) {
+        LOGE("nativeSliceBilateralGrid: Buffer pointers null or not direct");
+        return JNI_FALSE;
+    }
+
+    const jsize gridLen = env->GetArrayLength(gridData);
+    const jsize expectedLen = 12 * gridDepth * gridH * gridW;
+    if (gridLen < expectedLen) {
+        LOGE("nativeSliceBilateralGrid: Grid tensor size %d is less than expected %d", gridLen, expectedLen);
+        return JNI_FALSE;
+    }
+
+    jfloat* gridPtr = env->GetFloatArrayElements(gridData, nullptr);
+    if (gridPtr == nullptr) {
+        LOGE("nativeSliceBilateralGrid: Failed to get grid data elements");
+        return JNI_FALSE;
+    }
+
+    lumacore::sliceBilateralGrid(
+        inPtr,
+        width,
+        height,
+        pixelStride,
+        gridPtr,
+        gridDepth,
+        gridH,
+        gridW,
+        outPtr
+    );
+
+    env->ReleaseFloatArrayElements(gridData, gridPtr, JNI_ABORT);
+    return JNI_TRUE;
 }
 
 } // extern "C"

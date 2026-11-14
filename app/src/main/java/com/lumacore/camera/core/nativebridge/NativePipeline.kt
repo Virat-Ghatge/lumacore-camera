@@ -51,4 +51,16 @@ object NativePipeline {
         outU: ByteBuffer,
         outV: ByteBuffer
     ): FloatArray
+
+    external fun nativeSliceBilateralGrid(
+        inBuffer: ByteBuffer,
+        width: Int,
+        height: Int,
+        pixelStride: Int,
+        gridData: FloatArray,
+        gridDepth: Int,
+        gridHeight: Int,
+        gridWidth: Int,
+        outBuffer: ByteBuffer
+    ): Boolean
 }

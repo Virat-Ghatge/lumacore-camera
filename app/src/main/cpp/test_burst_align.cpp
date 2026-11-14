@@ -1,6 +1,7 @@
 #include "lumacore_homography.hpp"
 #include "lumacore_pyramid.hpp"
 #include "lumacore_merge.hpp"
+#include "lumacore_bilateral_slice.hpp"
 
 #include <cassert>
 #include <chrono>
@@ -238,15 +239,71 @@ void testGhostRejection() {
     std::cout << "[PASS] testGhostRejection" << std::endl;
 }
 
+void testBilateralGridSliceIdentity() {
+    std::cout << "[RUN] testBilateralGridSliceIdentity..." << std::endl;
+    constexpr int32_t gridDepth = 8;
+    constexpr int32_t gridH = 16;
+    constexpr int32_t gridW = 16;
+    constexpr int32_t totalGridElements = 12 * gridDepth * gridH * gridW;
+
+    std::vector<float> grid(totalGridElements, 0.0f);
+    constexpr int32_t depthStride = gridH * gridW;
+    constexpr int32_t channelStride = gridDepth * depthStride;
+
+    // Set identity affine transform for all grid cells:
+    // R_out = 1.0 * R_in (channel 0)
+    // G_out = 1.0 * G_in (channel 5)
+    // B_out = 1.0 * B_in (channel 10)
+    for (int32_t d = 0; d < gridDepth; ++d) {
+        for (int32_t y = 0; y < gridH; ++y) {
+            for (int32_t x = 0; x < gridW; ++x) {
+                const int32_t cellIdx = d * depthStride + y * gridW + x;
+                grid[0 * channelStride + cellIdx] = 1.0f;
+                grid[5 * channelStride + cellIdx] = 1.0f;
+                grid[10 * channelStride + cellIdx] = 1.0f;
+            }
+        }
+    }
+
+    constexpr int32_t W = 64;
+    constexpr int32_t H = 48;
+    std::vector<uint8_t> inRgb(W * H * 3);
+    for (int32_t i = 0; i < W * H * 3; ++i) {
+        inRgb[i] = static_cast<uint8_t>((i * 17 + 31) % 256);
+    }
+
+    std::vector<uint8_t> outRgb(W * H * 3, 0);
+    lumacore::sliceBilateralGrid(inRgb.data(), W, H, grid.data(), gridDepth, gridH, gridW, outRgb.data());
+
+    for (size_t i = 0; i < inRgb.size(); ++i) {
+        assert(std::abs(static_cast<int>(outRgb[i]) - static_cast<int>(inRgb[i])) <= 1);
+    }
+
+    // Benchmark 1080p image slicing performance
+    constexpr int32_t fhdW = 1920;
+    constexpr int32_t fhdH = 1080;
+    std::vector<uint8_t> fhdIn(fhdW * fhdH * 3, 128);
+    std::vector<uint8_t> fhdOut(fhdW * fhdH * 3, 0);
+
+    const auto start = std::chrono::high_resolution_clock::now();
+    lumacore::sliceBilateralGrid(fhdIn.data(), fhdW, fhdH, grid.data(), gridDepth, gridH, gridW, fhdOut.data());
+    const auto end = std::chrono::high_resolution_clock::now();
+    const double sliceMs = std::chrono::duration<double, std::milli>(end - start).count();
+
+    std::cout << "  1080p CPU Bilateral Slicing Latency: " << sliceMs << " ms (target: < 25ms)" << std::endl;
+    std::cout << "[PASS] testBilateralGridSliceIdentity" << std::endl;
+}
+
 } // anonymous namespace
 
 int main() {
-    std::cout << "=== Running LumaCore Milestone 3 Burst Alignment Native Unit Tests ===" << std::endl;
+    std::cout << "=== Running LumaCore Milestone 4 Burst Alignment & Bilateral Slice Native Unit Tests ===" << std::endl;
     testIdentityHomography();
     testMatrixInverse();
     testGyroHomography();
     testPyramidTranslationRecovery();
     testGhostRejection();
-    std::cout << "=== ALL 5 BURST ALIGNMENT TESTS PASSED SUCCESSFULLY! ===" << std::endl;
+    testBilateralGridSliceIdentity();
+    std::cout << "=== ALL 6 NATIVE TESTS PASSED SUCCESSFULLY! ===" << std::endl;
     return 0;
 }
