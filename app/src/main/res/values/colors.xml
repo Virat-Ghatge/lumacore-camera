@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="gold_accent">#FFFFC107</color>
+    <color name="gold_accent_variant">#FFFFD54F</color>
+    <color name="dark_background">#FF121212</color>
+    <color name="dark_surface">#FF1E1E1E</color>
+    <color name="dark_surface_pill">#B32A2A2A</color>
+    <color name="reticle_yellow">#FFFFD600</color>
+</resources>

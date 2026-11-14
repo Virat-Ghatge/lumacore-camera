@@ -1,0 +1,33 @@
+<resources>
+    <string name="app_name">LumaCore</string>
+
+    <!-- Modes -->
+    <string name="mode_night">NIGHT</string>
+    <string name="mode_photo">PHOTO</string>
+    <string name="mode_action">ACTION</string>
+    <string name="mode_video_v2">VIDEO (v2)</string>
+
+    <!-- Controls -->
+    <string name="action_shutter">Take Photo</string>
+    <string name="action_flip_camera">Switch Camera</string>
+    <string name="action_open_gallery">Open Gallery</string>
+    <string name="action_flash">Toggle Flash</string>
+    <string name="action_hdr">Toggle HDR</string>
+    <string name="action_timer">Toggle Timer</string>
+    <string name="action_aspect_ratio">Toggle Aspect Ratio</string>
+    <string name="action_settings">Open Settings</string>
+
+    <!-- Settings Dialog / Sheet -->
+    <string name="settings_title">Camera Settings</string>
+    <string name="settings_hardware_tier_title">Hardware Processing Tier</string>
+    <string name="settings_grid_title">Rule of Thirds Grid</string>
+    <string name="settings_grid_desc">Display framing grid overlay on viewfinder</string>
+    <string name="settings_telemetry_title">Real-time Telemetry Overlay</string>
+    <string name="settings_telemetry_desc">Show alignment ms, inference latency, and memory footprint</string>
+    <string name="settings_about_title">LumaCore Neural Engine</string>
+    <string name="settings_about_desc">Dual-engine mobile computational photography architecture with edge AI burst fusion.</string>
+
+    <!-- Permissions -->
+    <string name="permission_camera_rationale">Camera permission is required to capture photos and preview stream.</string>
+    <string name="permission_grant_button">Grant Permission</string>
+</resources>

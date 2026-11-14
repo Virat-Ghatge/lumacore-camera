@@ -1,0 +1,37 @@
+{
+  "mode": "implement",
+  "effort_profile": "balanced",
+  "planning": "compact",
+  "context_depth": "dependency",
+  "verification_depth": "impact",
+  "delegation": "conditional",
+  "reason_codes": [
+    "milestone-1-scaffolding-and-ui-shell"
+  ],
+  "allowed_write_scope": [
+    "build.gradle.kts",
+    "settings.gradle.kts",
+    "gradle.properties",
+    "gradle/libs.versions.toml",
+    "app/build.gradle.kts",
+    "app/src/main/AndroidManifest.xml",
+    "app/src/main/java",
+    "app/src/main/res",
+    "app/src/main/cpp",
+    "app/src/main/assets",
+    ".gitignore",
+    "README.md",
+    "ml"
+  ],
+  "acceptance_criteria": [
+    "Gradle build passes",
+    "Stock Camera UI shell renders cleanly",
+    "Git repository tracked and synced"
+  ],
+  "files_read_in_session": [
+    "ml/export_hdrnet_onnx.py"
+  ],
+  "last_mutation_ts": 1794674840.0,
+  "last_verified_ts": 1794674290.7195997,
+  "last_verdict": "PASS"
+}
