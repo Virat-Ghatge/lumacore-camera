@@ -6,32 +6,29 @@
   "verification_depth": "impact",
   "delegation": "conditional",
   "reason_codes": [
-    "milestone-1-scaffolding-and-ui-shell"
+    "milestone-2-adaptive-camera2-engine"
   ],
   "allowed_write_scope": [
-    "build.gradle.kts",
-    "settings.gradle.kts",
-    "gradle.properties",
-    "gradle/libs.versions.toml",
-    "app/build.gradle.kts",
-    "app/src/main/AndroidManifest.xml",
-    "app/src/main/java",
-    "app/src/main/res",
-    "app/src/main/cpp",
-    "app/src/main/assets",
-    ".gitignore",
-    "README.md",
-    "ml"
+    "app/src/main/java/com/lumacore/camera/core",
+    "app/src/main/java/com/lumacore/camera/ui",
+    "app/src/main/java/com/lumacore/camera/MainActivity.kt",
+    "README.md"
   ],
   "acceptance_criteria": [
-    "Gradle build passes",
-    "Stock Camera UI shell renders cleanly",
-    "Git repository tracked and synced"
+    "Hardware tier probing implemented",
+    "3-slot bounded ring buffer with drop-oldest",
+    "CaptureModeStrategy hierarchy implemented",
+    "Camera2 session and SurfaceView viewfinder wired",
+    "Single and burst capture saving implemented",
+    "assembleDebug passes"
   ],
   "files_read_in_session": [
-    "ml/export_hdrnet_onnx.py"
+    "app/src/main/java/com/lumacore/camera/MainActivity.kt",
+    "app/src/main/java/com/lumacore/camera/ui/CameraViewModel.kt",
+    "app/src/main/java/com/lumacore/camera/ui/CameraScreen.kt",
+    "app/src/main/java/com/lumacore/camera/core/model/CameraEnums.kt"
   ],
-  "last_mutation_ts": 1794674840.0,
-  "last_verified_ts": 1794674290.7195997,
+  "last_mutation_ts": 1794676600.0,
+  "last_verified_ts": 1794674966.9958618,
   "last_verdict": "PASS"
 }

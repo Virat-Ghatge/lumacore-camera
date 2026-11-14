@@ -66,14 +66,24 @@ flowchart TD
 │   │   │   ├── java/com/lumacore/camera/
 │   │   │   │   ├── MainActivity.kt # Edge-to-edge root activity & permission launcher
 │   │   │   │   ├── core/
+│   │   │   │   │   ├── buffer/
+│   │   │   │   │   │   └── BoundedImageRingBuffer.kt # Strict 3-slot bounded ring buffer with drop-oldest policy & atomic lock
+│   │   │   │   │   ├── engine/
+│   │   │   │   │   │   └── Camera2CaptureEngine.kt   # Camera2 session lifecycle, preview, metering & burst engine
+│   │   │   │   │   ├── hardware/
+│   │   │   │   │   │   └── HardwareCapabilityProber.kt # CameraCharacteristics probe, tier classification, binned 12MP sizing
 │   │   │   │   │   ├── model/
 │   │   │   │   │   │   └── CameraEnums.kt # Enums: FlashMode, HdrMode, TimerSetting, AspectRatio, CaptureMode, HardwareTier, LensFacing
-│   │   │   │   │   └── nativebridge/
-│   │   │   │   │       └── NativePipeline.kt # JNI connector to lumacore_native
+│   │   │   │   │   ├── nativebridge/
+│   │   │   │   │   │   └── NativePipeline.kt # JNI connector to lumacore_native
+│   │   │   │   │   ├── storage/
+│   │   │   │   │   │   └── MediaSaver.kt # Scoped MediaStore DCIM/LumaCore saver with complete EXIF tags
+│   │   │   │   │   └── strategy/
+│   │   │   │   │       └── CaptureModeStrategy.kt # PhotoStandard, NightBurst, ActionAntiBlur, SuperResZoom, Video strategies
 │   │   │   │   └── ui/
-│   │   │   │       ├── CameraScreen.kt      # Root viewfinder & layout scaffold
+│   │   │   │       ├── CameraScreen.kt      # Root viewfinder & layout scaffold with SurfaceView integration
 │   │   │   │       ├── CameraUiState.kt     # Immutable UI state data class
-│   │   │   │       ├── CameraViewModel.kt   # State manager & gesture/capture controller
+│   │   │   │       ├── CameraViewModel.kt   # State manager & gesture/capture controller wired to engine
 │   │   │   │       ├── components/
 │   │   │   │       │   ├── TopControlBar.kt        # Flash, HDR, Timer, Ratio & Settings toggles
 │   │   │   │       │   ├── ViewfinderControls.kt   # Tap-to-focus reticle, EV sun slider, zoom pills, 3x3 grid
@@ -104,15 +114,19 @@ flowchart TD
   - Modern Stock Camera UI in Jetpack Compose:
     - Top control bar (Flash, HDR, Timer, Aspect ratio, Settings).
     - Viewfinder with tap-to-focus animated reticle, EV sun slider, pinch-to-zoom, and rule-of-thirds grid.
-    - Bottom control deck with horizontal mode carousel (`NIGHT`, `PHOTO`, `ACTION`, `VIDEO`), gallery button, tactile shutter button with animated outer ring indicator for burst fusion progress, and flip camera button.
+    - Bottom control deck with horizontal mode carousel (`NIGHT`, `PHOTO`, `ACTION`, `ZOOM+`, `VIDEO`), gallery button, tactile shutter button with animated outer ring indicator for burst fusion progress, and flip camera button.
     - Modal settings bottom sheet displaying hardware tier status and real-time telemetry HUD toggle.
   - Native C++ engine stub (`lumacore_native`) with JNI lifecycle.
   - Neural model export script (`ml/export_hdrnet_onnx.py`).
 
-- [ ] **Milestone 2: Camera2 Hardware Probing & Zero-Shutter-Lag Pipeline**
-  - Camera2 API `CameraDevice`, `CameraCaptureSession`, and `ImageReader` management.
-  - Dynamic capability probing: determine device hardware tier (Tier 1 RAW vs Tier 2 Fast YUV).
-  - High-performance `SurfaceView` viewfinder rendering with zero shutter lag (ZSL) circular frame buffering.
+- [x] **Milestone 2: Camera2 Hardware Probing & Zero-Shutter-Lag Pipeline**
+  - `HardwareCapabilityProber`: Inspects `CameraCharacteristics` (Hardware level 3/FULL/LIMITED/LEGACY, RAW capabilities) and maps to structured `HardwareProfile`.
+  - Resolution selector: Selects optimal binned ~12MP resolution (`targetPixels = 12_000_000`, e.g., 4000x3000, 4032x3024) instead of unbinned 50MP/64MP/108MP buffers.
+  - `BoundedImageRingBuffer`: Strict 3-slot bounded image buffer with Drop-Oldest eviction and immediate hardware buffer recycling (`image.close()`), plus atomic shutter lock preventing overlapping captures.
+  - `CaptureModeStrategy` hierarchy: `PhotoStandardModeStrategy` (with Tier 2 edge/noise bypass), `NightBurstModeStrategy` (8 frames AE bracketing), `ActionAntiBlurModeStrategy` (6 frames high shutter speed bias), `SuperResZoomModeStrategy` (4 frames sub-pixel sampling), and `VideoModePlaceholderStrategy`.
+  - `Camera2CaptureEngine`: HandlerThread lifecycle, repeating preview request, tap-to-focus metering calculation, zoom ratio with Android 11+ `CONTROL_ZOOM_RATIO` and Android 10 `SCALER_CROP_REGION` fallback, EV compensation, and atomic burst capture.
+  - `MediaSaver`: Persistent scoped MediaStore saving to `DCIM/LumaCore` with EXIF tags (Make, Model, Software, Orientation, ISO, ExposureTime).
+  - UI integration: `SurfaceView` embedded in Compose viewfinder, `CameraViewModel` controlling camera lifecycle, permission handling, and capture callbacks.
 
 - [ ] **Milestone 3: C++20 / NDK Multi-Frame Burst Fusion Engine**
   - Native frame buffer ingestion and memory pooling.

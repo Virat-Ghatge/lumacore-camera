@@ -67,6 +67,7 @@ enum class CaptureMode(val label: String) {
     NIGHT("NIGHT"),
     PHOTO("PHOTO"),
     ACTION("ACTION"),
+    SUPER_RES_ZOOM("ZOOM+"),
     VIDEO_V2("VIDEO (v2)")
 }
 

@@ -1,5 +1,7 @@
 package com.lumacore.camera.ui
 
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,6 +25,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import com.lumacore.camera.core.model.AspectRatioSetting
 import com.lumacore.camera.ui.components.BottomControlDeck
 import com.lumacore.camera.ui.components.SettingsBottomSheet
@@ -90,22 +93,43 @@ fun CameraScreen(
                         ),
                     contentAlignment = Alignment.Center
                 ) {
-                    // Viewfinder Surface Placeholder (Ready for Camera2 SurfaceView in Milestone 2)
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Text(
-                            text = "LumaCore RAW Sensor Viewfinder",
-                            color = WhiteMuted,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium
+                    // Real-time Camera2 Preview Viewfinder via SurfaceView
+                    if (uiState.hasCameraPermission) {
+                        AndroidView(
+                            factory = { context ->
+                                SurfaceView(context).apply {
+                                    holder.addCallback(object : SurfaceHolder.Callback {
+                                        override fun surfaceCreated(holder: SurfaceHolder) {
+                                            viewModel.attachSurface(holder.surface)
+                                        }
+
+                                        override fun surfaceChanged(
+                                            holder: SurfaceHolder,
+                                            format: Int,
+                                            width: Int,
+                                            height: Int
+                                        ) {
+                                        }
+
+                                        override fun surfaceDestroyed(holder: SurfaceHolder) {
+                                            viewModel.detachSurface()
+                                        }
+                                    })
+                                }
+                            },
+                            modifier = Modifier.fillMaxSize()
                         )
-                        Text(
-                            text = "Zoom: ${String.format("%.1fx", uiState.zoomRatio)} | EV: ${uiState.exposureCompensation}",
-                            color = GoldAccent,
-                            fontSize = 11.sp,
-                            fontFamily = FontFamily.Monospace
-                        )
+                    } else {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                text = "Camera Permission Required",
+                                color = WhiteMuted,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
                     }
 
                     // Viewfinder Gesture & Reticle Controls Overlay
