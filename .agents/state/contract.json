@@ -6,29 +6,29 @@
   "verification_depth": "impact",
   "delegation": "conditional",
   "reason_codes": [
-    "milestone-2-adaptive-camera2-engine"
+    "milestone-3-cpp20-burst-alignment"
   ],
   "allowed_write_scope": [
+    "app/src/main/cpp",
     "app/src/main/java/com/lumacore/camera/core",
-    "app/src/main/java/com/lumacore/camera/ui",
-    "app/src/main/java/com/lumacore/camera/MainActivity.kt",
     "README.md"
   ],
   "acceptance_criteria": [
-    "Hardware tier probing implemented",
-    "3-slot bounded ring buffer with drop-oldest",
-    "CaptureModeStrategy hierarchy implemented",
-    "Camera2 session and SurfaceView viewfinder wired",
-    "Single and burst capture saving implemented",
-    "assembleDebug passes"
+    "C++20 Gyro Homography computation implemented",
+    "3-Level Gaussian Pyramid L1 block matching implemented",
+    "Ghost rejection temporal merging implemented",
+    "JNI bridge and GyroscopeSampler wired",
+    "assembleDebug and native compilation pass"
   ],
   "files_read_in_session": [
-    "app/src/main/java/com/lumacore/camera/MainActivity.kt",
-    "app/src/main/java/com/lumacore/camera/ui/CameraViewModel.kt",
-    "app/src/main/java/com/lumacore/camera/ui/CameraScreen.kt",
-    "app/src/main/java/com/lumacore/camera/core/model/CameraEnums.kt"
+    "app/src/main/cpp/CMakeLists.txt",
+    "app/src/main/cpp/lumacore_native.cpp",
+    "app/src/main/java/com/lumacore/camera/core/nativebridge/NativePipeline.kt",
+    "app/src/main/java/com/lumacore/camera/core/engine/Camera2CaptureEngine.kt",
+    "app/src/main/java/com/lumacore/camera/core/storage/MediaSaver.kt",
+    "README.md"
   ],
-  "last_mutation_ts": 1794676600.0,
-  "last_verified_ts": 1794674966.9958618,
+  "last_mutation_ts": 1794677200.0,
+  "last_verified_ts": 1794675640.7780569,
   "last_verdict": "PASS"
 }

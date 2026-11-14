@@ -62,7 +62,14 @@ flowchart TD
 │   │   │   ├── assets/models/      # Neural network assets (HDRNet bilateral grid ONNX)
 │   │   │   ├── cpp/                # Native C++20 engine
 │   │   │   │   ├── CMakeLists.txt  # CMake configuration (C++20, liblog, libandroid, GLESv3)
-│   │   │   │   └── lumacore_native.cpp # NativeEngine & JNI entry points
+│   │   │   │   ├── lumacore_homography.hpp # 3x3 projective matrix math & gyro calibration
+│   │   │   │   ├── lumacore_homography.cpp
+│   │   │   │   ├── lumacore_pyramid.hpp    # 3-level Gaussian pyramid & L1 block matching
+│   │   │   │   ├── lumacore_pyramid.cpp
+│   │   │   │   ├── lumacore_merge.hpp      # Shot-noise modeled ghost-rejection temporal merge
+│   │   │   │   ├── lumacore_merge.cpp
+│   │   │   │   ├── test_burst_align.cpp    # Native unit test suite
+│   │   │   │   └── lumacore_native.cpp     # NativeEngine & JNI entry points
 │   │   │   ├── java/com/lumacore/camera/
 │   │   │   │   ├── MainActivity.kt # Edge-to-edge root activity & permission launcher
 │   │   │   │   ├── core/
@@ -76,6 +83,8 @@ flowchart TD
 │   │   │   │   │   │   └── CameraEnums.kt # Enums: FlashMode, HdrMode, TimerSetting, AspectRatio, CaptureMode, HardwareTier, LensFacing
 │   │   │   │   │   ├── nativebridge/
 │   │   │   │   │   │   └── NativePipeline.kt # JNI connector to lumacore_native
+│   │   │   │   │   ├── sensor/
+│   │   │   │   │   │   └── GyroscopeSampler.kt # High-frequency gyro integration between frame timestamps
 │   │   │   │   │   ├── storage/
 │   │   │   │   │   │   └── MediaSaver.kt # Scoped MediaStore DCIM/LumaCore saver with complete EXIF tags
 │   │   │   │   │   └── strategy/
@@ -128,10 +137,13 @@ flowchart TD
   - `MediaSaver`: Persistent scoped MediaStore saving to `DCIM/LumaCore` with EXIF tags (Make, Model, Software, Orientation, ISO, ExposureTime).
   - UI integration: `SurfaceView` embedded in Compose viewfinder, `CameraViewModel` controlling camera lifecycle, permission handling, and capture callbacks.
 
-- [ ] **Milestone 3: C++20 / NDK Multi-Frame Burst Fusion Engine**
-  - Native frame buffer ingestion and memory pooling.
-  - Tile-based Lucas-Kanade / block-matching motion estimation and sub-pixel alignment.
-  - Robust temporal fusion with noise estimation and tone reproduction.
+- [x] **Milestone 3: C++20 / NDK Gyro-Assisted Pyramid Burst Alignment & Temporal Merging**
+  - `lumacore_homography`: Projective 3x3 homography matrix algebra, analytical cofactor matrix inverse, and gyro rotational homography $H = K R K^{-1}$ with $< 0.2\text{ms}$ latency.
+  - `lumacore_pyramid`: 3-level Gaussian downsampled luma pyramid with coarse-to-fine L1 block matching, parabolic sub-pixel refinement, and regularized 8-DOF homography solver.
+  - `lumacore_merge`: Shot-noise variance modeled temporal frame accumulation ($\sigma^2 = \max(1.0, a I_{ref} + b)$), $4\sigma$ ghost-motion rejection, and multi-plane YUV chroma accumulation.
+  - `test_burst_align`: Native unit tests verifying identity transforms, matrix inversion, gyro calibration, synthetic translation recovery ($dx=3, dy=2$), and moving-box ghost rejection.
+  - `GyroscopeSampler`: High-frequency (`SENSOR_DELAY_FASTEST`) background sensor sampling with trapezoidal integration between frame exposure timestamps.
+  - `Camera2CaptureEngine` & `NativePipeline`: End-to-end wiring of multi-frame burst fusion with bounded buffers and scoped MediaStore JPEG persistence.
 
 - [ ] **Milestone 4: Edge AI HDRNet Bilateral Grid Inference**
   - ONNX Runtime integration with NNAPI execution provider.

@@ -1,6 +1,7 @@
 package com.lumacore.camera.core.nativebridge
 
 import android.util.Log
+import java.nio.ByteBuffer
 
 /**
  * JNI Bridge to lumacore_native C++ engine.
@@ -24,5 +25,30 @@ object NativePipeline {
     fun isNativeReady(): Boolean = isLoaded
 
     external fun nativeInit(): Boolean
+
     external fun nativeGetVersion(): String?
+
+    external fun nativeComputeGyroHomography(
+        rotX: Float,
+        rotY: Float,
+        rotZ: Float,
+        focalLength: Float,
+        cx: Float,
+        cy: Float
+    ): FloatArray
+
+    external fun nativeAlignAndMergeBurst(
+        yPlanes: Array<ByteBuffer>,
+        uPlanes: Array<ByteBuffer>,
+        vPlanes: Array<ByteBuffer>,
+        width: Int,
+        height: Int,
+        yRowStride: Int,
+        uvRowStride: Int,
+        uvPixelStride: Int,
+        gyroRotations: FloatArray,
+        outY: ByteBuffer,
+        outU: ByteBuffer,
+        outV: ByteBuffer
+    ): FloatArray
 }

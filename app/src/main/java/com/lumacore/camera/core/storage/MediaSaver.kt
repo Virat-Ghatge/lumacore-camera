@@ -224,6 +224,45 @@ object MediaSaver {
     }
 
     /**
+     * Converts planar Y, U, V byte buffers (from native burst fusion) to standard JPEG bytes via NV21.
+     */
+    fun convertPlanarYuvToJpegBytes(
+        outY: ByteBuffer,
+        outU: ByteBuffer,
+        outV: ByteBuffer,
+        width: Int,
+        height: Int
+    ): ByteArray {
+        val ySize = width * height
+        val uvSize = width * height / 2
+        val nv21 = ByteArray(ySize + uvSize)
+
+        outY.rewind()
+        outU.rewind()
+        outV.rewind()
+
+        outY.get(nv21, 0, ySize)
+
+        val uvWidth = width / 2
+        val uvHeight = height / 2
+        var pos = ySize
+
+        for (row in 0 until uvHeight) {
+            for (col in 0 until uvWidth) {
+                val vByte = outV.get(row * uvWidth + col)
+                val uByte = outU.get(row * uvWidth + col)
+                nv21[pos++] = vByte
+                nv21[pos++] = uByte
+            }
+        }
+
+        val yuvImage = YuvImage(nv21, ImageFormat.NV21, width, height, null)
+        val outStream = ByteArrayOutputStream()
+        yuvImage.compressToJpeg(Rect(0, 0, width, height), 95, outStream)
+        return outStream.toByteArray()
+    }
+
+    /**
      * Converts RAW_SENSOR pattern buffer into preview-compatible JPEG representation.
      */
     private fun convertRawToJpegBytes(image: Image): ByteArray {

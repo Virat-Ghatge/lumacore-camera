@@ -27,6 +27,8 @@ import com.lumacore.camera.core.hardware.HardwareCapabilityProber
 import com.lumacore.camera.core.hardware.HardwareProfile
 import com.lumacore.camera.core.model.HardwareTier
 import com.lumacore.camera.core.model.LensFacing
+import com.lumacore.camera.core.nativebridge.NativePipeline
+import com.lumacore.camera.core.sensor.GyroscopeSampler
 import com.lumacore.camera.core.storage.MediaSaver
 import com.lumacore.camera.core.strategy.CaptureModeStrategy
 import kotlinx.coroutines.CoroutineScope
@@ -34,6 +36,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.nio.ByteBuffer
+import java.util.Locale
 
 /**
  * Core Camera2 Capture Engine orchestrating camera lifecycle, real-time preview,
@@ -51,6 +55,8 @@ class Camera2CaptureEngine(
 
     private val engineScope: CoroutineScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     val ringBuffer: BoundedImageRingBuffer = BoundedImageRingBuffer(maxCapacity = 3)
+    private val gyroSampler: GyroscopeSampler = GyroscopeSampler(context)
+    var latestTelemetrySummary: String? = null
 
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
@@ -304,6 +310,7 @@ class Camera2CaptureEngine(
         }
 
         ringBuffer.clear()
+        gyroSampler.startSampling()
         val totalFrames = strategy.burstCount
 
         try {
@@ -347,12 +354,14 @@ class Camera2CaptureEngine(
                         failure: CaptureFailure
                     ) {
                         Log.e(TAG, "Capture failed with reason: ${failure.reason}")
+                        gyroSampler.stopSampling()
                     }
                 },
                 cameraHandler
             )
         } catch (e: Exception) {
             Log.e(TAG, "Error initiating burst capture", e)
+            gyroSampler.stopSampling()
             ringBuffer.releaseShutterLock()
             onComplete(null)
         }
@@ -380,19 +389,26 @@ class Camera2CaptureEngine(
 
             if (frames.isEmpty()) {
                 Log.e(TAG, "No frames drained from ring buffer")
+                gyroSampler.stopSampling()
                 onComplete(null)
                 return
             }
 
-            // Select primary frame for final save
-            val selectedFrame: Image = frames[frames.size / 2]
             val orientation = hardwareProfile?.sensorOrientation ?: 90
+            val savedUri: Uri?
 
-            val savedUri = MediaSaver.saveImage(
-                context = context,
-                image = selectedFrame,
-                orientationDegrees = orientation
-            )
+            if (frames.size == 1 || !NativePipeline.isNativeReady() || frames[0].format != ImageFormat.YUV_420_888) {
+                // Select primary frame for direct single frame save
+                val selectedFrame: Image = frames[frames.size / 2]
+                savedUri = MediaSaver.saveImage(
+                    context = context,
+                    image = selectedFrame,
+                    orientationDegrees = orientation
+                )
+            } else {
+                // Multi-frame burst fusion with C++20 gyro-assisted pyramid alignment & temporal merging
+                savedUri = mergeBurstFramesAndSave(frames, orientation)
+            }
 
             // Safely close every drained frame
             for (frame in frames) {
@@ -409,8 +425,89 @@ class Camera2CaptureEngine(
             Log.e(TAG, "Error in processAndSaveDrainedFrames", e)
             onComplete(null)
         } finally {
+            gyroSampler.stopSampling()
             ringBuffer.releaseShutterLock()
         }
+    }
+
+    private suspend fun mergeBurstFramesAndSave(
+        frames: List<Image>,
+        orientationDegrees: Int
+    ): Uri? {
+        val frameCount = frames.size
+        val width = frames[0].width
+        val height = frames[0].height
+
+        val yRowStride = frames[0].planes[0].rowStride
+        val uvRowStride = frames[0].planes[1].rowStride
+        val uvPixelStride = frames[0].planes[1].pixelStride
+
+        val yPlanes = Array(frameCount) { i ->
+            frames[i].planes[0].buffer.rewind()
+            frames[i].planes[0].buffer
+        }
+        val uPlanes = Array(frameCount) { i ->
+            frames[i].planes[1].buffer.rewind()
+            frames[i].planes[1].buffer
+        }
+        val vPlanes = Array(frameCount) { i ->
+            frames[i].planes[2].buffer.rewind()
+            frames[i].planes[2].buffer
+        }
+
+        val refTimestampNs = frames[0].timestamp
+        val gyroRotations = FloatArray((frameCount - 1) * 3)
+
+        for (k in 1 until frameCount) {
+            val targetTimestampNs = frames[k].timestamp
+            val rot = gyroSampler.integrateRotationBetween(refTimestampNs, targetTimestampNs)
+            val baseIdx = (k - 1) * 3
+            gyroRotations[baseIdx + 0] = rot[0]
+            gyroRotations[baseIdx + 1] = rot[1]
+            gyroRotations[baseIdx + 2] = rot[2]
+        }
+
+        val outY = ByteBuffer.allocateDirect(width * height)
+        val outU = ByteBuffer.allocateDirect((width / 2) * (height / 2))
+        val outV = ByteBuffer.allocateDirect((width / 2) * (height / 2))
+
+        val stats = NativePipeline.nativeAlignAndMergeBurst(
+            yPlanes = yPlanes,
+            uPlanes = uPlanes,
+            vPlanes = vPlanes,
+            width = width,
+            height = height,
+            yRowStride = yRowStride,
+            uvRowStride = uvRowStride,
+            uvPixelStride = uvPixelStride,
+            gyroRotations = gyroRotations,
+            outY = outY,
+            outU = outU,
+            outV = outV
+        )
+
+        val alignMs = stats.getOrNull(0) ?: 0.0f
+        val mergeMs = stats.getOrNull(1) ?: 0.0f
+        val ghostRatio = (stats.getOrNull(2) ?: 0.0f) * 100.0f
+        val mergedCount = stats.getOrNull(3)?.toInt() ?: frameCount
+
+        val telemetry = "Burst merged $mergedCount frames | Align: ${String.format(Locale.US, "%.1f", alignMs)}ms | Merge: ${String.format(Locale.US, "%.1f", mergeMs)}ms | Ghost Rejection: ${String.format(Locale.US, "%.1f", ghostRatio)}%"
+        Log.i(TAG, telemetry)
+        latestTelemetrySummary = telemetry
+
+        val jpegBytes = MediaSaver.convertPlanarYuvToJpegBytes(
+            outY = outY,
+            outU = outU,
+            outV = outV,
+            width = width,
+            height = height
+        )
+
+        return MediaSaver.saveJpeg(
+            context = context,
+            jpegBytes = jpegBytes,
+            orientationDegrees = orientationDegrees
+        )
     }
 
     /**
@@ -448,11 +545,13 @@ class Camera2CaptureEngine(
             Log.w(TAG, "Error closing ImageReader", e)
         }
 
+        gyroSampler.stopSampling()
         ringBuffer.clear()
     }
 
     override fun close(): Unit {
         closeCamera()
+        gyroSampler.stopSampling()
         ringBuffer.close()
         cameraThread.quitSafely()
     }
