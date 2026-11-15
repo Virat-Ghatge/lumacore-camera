@@ -9,6 +9,7 @@ uniform sampler2D uInputTexture;
 uniform sampler3D uGridTexture0;
 uniform sampler3D uGridTexture1;
 uniform sampler3D uGridTexture2;
+uniform float uSafetyBlend;
 
 void main() {
     vec4 color = texture(uInputTexture, vTexCoord);
@@ -24,5 +25,6 @@ void main() {
     enhanced.g = dot(affG.rgb, color.rgb) + affG.a;
     enhanced.b = dot(affB.rgb, color.rgb) + affB.a;
     
-    FragColor = vec4(clamp(enhanced, 0.0, 1.0), color.a);
+    vec3 finalRgb = mix(color.rgb, clamp(enhanced, 0.0, 1.0), uSafetyBlend);
+    FragColor = vec4(finalRgb, color.a);
 }

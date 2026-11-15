@@ -256,6 +256,15 @@ class CameraViewModel(
 
         engine.captureBurst(
             strategy = strategy,
+            onBurstCaptured = {
+                _uiState.update { state: CameraUiState ->
+                    state.copy(
+                        isCapturing = false,
+                        isProcessingInBackground = true,
+                        pendingJobsCount = state.pendingJobsCount + 1
+                    )
+                }
+            },
             onProgress = { progress: Float ->
                 _uiState.update { state: CameraUiState ->
                     state.copy(captureProgress = progress)
@@ -268,8 +277,10 @@ class CameraViewModel(
                     "Capture sequence failed"
                 }
                 _uiState.update { state: CameraUiState ->
+                    val newPendingCount = (state.pendingJobsCount - 1).coerceAtLeast(0)
                     state.copy(
-                        isCapturing = false,
+                        pendingJobsCount = newPendingCount,
+                        isProcessingInBackground = newPendingCount > 0,
                         captureProgress = 0.0f,
                         lastCapturedThumbnailUri = savedUri ?: state.lastCapturedThumbnailUri,
                         telemetrySummary = telemetry

@@ -88,4 +88,35 @@ object NativePipeline {
         outHeight: Int,
         outStride: Int
     ): Boolean
+
+    external fun nativeConvertYuvToRgba(
+        yPlane: ByteBuffer,
+        uPlane: ByteBuffer,
+        vPlane: ByteBuffer,
+        width: Int,
+        height: Int,
+        yRowStride: Int,
+        uvRowStride: Int,
+        uvPixelStride: Int,
+        outRgba: ByteBuffer
+    ): Boolean
+
+    external fun nativeProcessColorPipeline(
+        yPlane: ByteBuffer,
+        uPlane: ByteBuffer,
+        vPlane: ByteBuffer,
+        width: Int,
+        height: Int,
+        yRowStride: Int,
+        uvRowStride: Int,
+        uvPixelStride: Int,
+        blackLevel: FloatArray,
+        whiteLevel: Float,
+        colorGains: FloatArray,
+        colorTransform: FloatArray,
+        iso: Int,
+        exposureTimeNs: Long,
+        radialVignetteGain: Float,
+        outRgba: ByteBuffer
+    ): Boolean
 }

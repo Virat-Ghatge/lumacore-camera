@@ -4,6 +4,7 @@
 #include "lumacore_bilateral_slice.hpp"
 #include "lumacore_sharpness.hpp"
 #include "lumacore_super_res.hpp"
+#include "lumacore_color_pipeline.hpp"
 
 #include <jni.h>
 #include <android/log.h>
@@ -479,6 +480,122 @@ Java_com_lumacore_camera_core_nativebridge_NativePipeline_nativeMergeSuperRes2x(
     }
 
     return success ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_lumacore_camera_core_nativebridge_NativePipeline_nativeConvertYuvToRgba(
+    JNIEnv* env,
+    jobject /* thiz */,
+    jobject yPlane,
+    jobject uPlane,
+    jobject vPlane,
+    jint width,
+    jint height,
+    jint yRowStride,
+    jint uvRowStride,
+    jint uvPixelStride,
+    jobject outRgba
+) {
+    if (env == nullptr || yPlane == nullptr || uPlane == nullptr || vPlane == nullptr || outRgba == nullptr ||
+        width <= 0 || height <= 0 || yRowStride < width || uvRowStride <= 0 || uvPixelStride <= 0) {
+        LOGE("nativeConvertYuvToRgba: Invalid arguments or dimensions");
+        return JNI_FALSE;
+    }
+
+    const uint8_t* const yPtr = static_cast<const uint8_t*>(env->GetDirectBufferAddress(yPlane));
+    const uint8_t* const uPtr = static_cast<const uint8_t*>(env->GetDirectBufferAddress(uPlane));
+    const uint8_t* const vPtr = static_cast<const uint8_t*>(env->GetDirectBufferAddress(vPlane));
+    uint8_t* const outPtr = static_cast<uint8_t*>(env->GetDirectBufferAddress(outRgba));
+
+    if (yPtr == nullptr || uPtr == nullptr || vPtr == nullptr || outPtr == nullptr) {
+        LOGE("nativeConvertYuvToRgba: One or more buffers are not direct or are null");
+        return JNI_FALSE;
+    }
+
+    lumacore::convertYuvPlanesToRgba(
+        yPtr,
+        uPtr,
+        vPtr,
+        width,
+        height,
+        yRowStride,
+        uvRowStride,
+        uvPixelStride,
+        outPtr
+    );
+
+    return JNI_TRUE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_lumacore_camera_core_nativebridge_NativePipeline_nativeProcessColorPipeline(
+    JNIEnv* env,
+    jobject /* thiz */,
+    jobject yPlane,
+    jobject uPlane,
+    jobject vPlane,
+    jint width,
+    jint height,
+    jint yRowStride,
+    jint uvRowStride,
+    jint uvPixelStride,
+    jfloatArray blackLevel,
+    jfloat whiteLevel,
+    jfloatArray colorGains,
+    jfloatArray colorTransform,
+    jint iso,
+    jlong exposureTimeNs,
+    jfloat radialVignetteGain,
+    jobject outRgba
+) {
+    if (env == nullptr || yPlane == nullptr || uPlane == nullptr || vPlane == nullptr || outRgba == nullptr ||
+        blackLevel == nullptr || colorGains == nullptr || colorTransform == nullptr ||
+        width <= 0 || height <= 0 || yRowStride < width || uvRowStride <= 0 || uvPixelStride <= 0) {
+        LOGE("nativeProcessColorPipeline: Invalid parameters or null pointers");
+        return JNI_FALSE;
+    }
+
+    if (env->GetArrayLength(blackLevel) < 4 ||
+        env->GetArrayLength(colorGains) < 4 ||
+        env->GetArrayLength(colorTransform) < 9) {
+        LOGE("nativeProcessColorPipeline: Metadata arrays have insufficient size");
+        return JNI_FALSE;
+    }
+
+    const uint8_t* const yPtr = static_cast<const uint8_t*>(env->GetDirectBufferAddress(yPlane));
+    const uint8_t* const uPtr = static_cast<const uint8_t*>(env->GetDirectBufferAddress(uPlane));
+    const uint8_t* const vPtr = static_cast<const uint8_t*>(env->GetDirectBufferAddress(vPlane));
+    uint8_t* const outPtr = static_cast<uint8_t*>(env->GetDirectBufferAddress(outRgba));
+
+    if (yPtr == nullptr || uPtr == nullptr || vPtr == nullptr || outPtr == nullptr) {
+        LOGE("nativeProcessColorPipeline: Buffer addresses are null or not direct");
+        return JNI_FALSE;
+    }
+
+    lumacore::CameraColorMetadata meta;
+    meta.whiteLevel = whiteLevel;
+    meta.iso = iso;
+    meta.exposureTimeNs = exposureTimeNs;
+    meta.radialVignetteGain = radialVignetteGain;
+
+    env->GetFloatArrayRegion(blackLevel, 0, 4, meta.blackLevel);
+    env->GetFloatArrayRegion(colorGains, 0, 4, meta.colorGains);
+    env->GetFloatArrayRegion(colorTransform, 0, 9, meta.colorTransform);
+
+    lumacore::processCalibratedSensorPipeline(
+        yPtr,
+        uPtr,
+        vPtr,
+        width,
+        height,
+        yRowStride,
+        uvRowStride,
+        uvPixelStride,
+        meta,
+        outPtr
+    );
+
+    return JNI_TRUE;
 }
 
 } // extern "C"

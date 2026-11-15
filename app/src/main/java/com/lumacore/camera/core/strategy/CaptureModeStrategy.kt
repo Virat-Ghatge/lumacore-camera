@@ -72,12 +72,12 @@ class PhotoStandardModeStrategy(
             builder.set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_FAST)
         }
 
-        // Bracket exposure when HDR mode is active
+        // Pixel-style underexposure schedule when HDR mode is active (never positive EV to prevent motion blur)
         if (isHdrActive && totalFrames >= 3) {
             val evOffset = when (frameIndex) {
-                0 -> -1
-                1 -> 0
-                else -> 1
+                0 -> -2
+                1 -> -1
+                else -> 0
             }
             builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, evOffset)
         }
@@ -120,20 +120,18 @@ class NightBurstModeStrategy(
             builder.set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_FAST)
         }
 
-        // Auto-exposure bracketing sequence from -1.5 EV to +1.5 EV:
-        // Frames 0-1: -2 (highlight preservation)
-        // Frame 2: -1
-        // Frames 3-4: 0 (neutral midtones)
-        // Frame 5: +1
-        // Frames 6-7: +2 (deep shadow lifting)
+        // Pixel-style underexposure bracketing schedule:
+        // Handheld night burst MUST NOT use positive overexposure (+1/+2 EV) which causes motion blur.
+        // Frames 0-2: -2 EV (extreme highlight preservation & motion freeze)
+        // Frames 3-5: -1 EV (fast midtones for temporal SNR accumulation)
+        // Frames 6-7:  0 EV (neutral base ceiling; shadows are lifted by bilateral grid & temporal fusion)
         val evOffset = when (frameIndex) {
-            0, 1 -> -2
-            2 -> -1
-            3, 4 -> 0
-            5 -> 1
-            else -> 2
+            0, 1, 2 -> -2
+            3, 4, 5 -> -1
+            else -> 0
         }
         builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, evOffset)
+        builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(30, 60))
     }
 }
 

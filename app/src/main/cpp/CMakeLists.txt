@@ -16,6 +16,7 @@ add_library(
     lumacore_bilateral_slice.cpp
     lumacore_sharpness.cpp
     lumacore_super_res.cpp
+    lumacore_color_pipeline.cpp
 )
 
 find_library(log-lib log)
@@ -39,6 +40,7 @@ add_executable(
     lumacore_bilateral_slice.cpp
     lumacore_sharpness.cpp
     lumacore_super_res.cpp
+    lumacore_color_pipeline.cpp
 )
 
 target_link_libraries(

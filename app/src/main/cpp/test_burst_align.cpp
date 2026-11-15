@@ -4,6 +4,7 @@
 #include "lumacore_bilateral_slice.hpp"
 #include "lumacore_sharpness.hpp"
 #include "lumacore_super_res.hpp"
+#include "lumacore_color_pipeline.hpp"
 
 #include <cassert>
 #include <chrono>
@@ -412,6 +413,158 @@ void testSuperRes2xMerge() {
     std::cout << "[PASS] testSuperRes2xMerge" << std::endl;
 }
 
+void testColorCorrectionPipeline() {
+    std::cout << "[RUN] testColorCorrectionPipeline..." << std::endl;
+
+    // Test 1: Direct YUV to RGBA conversion for neutral gray
+    constexpr int W = 8;
+    constexpr int H = 8;
+    std::vector<uint8_t> yPlane(W * H, 180);
+    std::vector<uint8_t> uPlane((W / 2) * (H / 2), 128);
+    std::vector<uint8_t> vPlane((W / 2) * (H / 2), 128);
+    std::vector<uint8_t> rgbaOut(W * H * 4, 0);
+
+    lumacore::convertYuvPlanesToRgba(
+        yPlane.data(),
+        uPlane.data(),
+        vPlane.data(),
+        W,
+        H,
+        W,
+        W / 2,
+        1,
+        rgbaOut.data()
+    );
+
+    // Verify neutral gray converts accurately: R=180, G=180, B=180, A=255
+    for (int i = 0; i < W * H; ++i) {
+        assert(rgbaOut[i * 4 + 0] == 180);
+        assert(rgbaOut[i * 4 + 1] == 180);
+        assert(rgbaOut[i * 4 + 2] == 180);
+        assert(rgbaOut[i * 4 + 3] == 255);
+    }
+    std::cout << "  YUV->RGBA conversion verified." << std::endl;
+
+    // Test 2: Black-level subtraction
+    // If input is blackLevel (e.g. 16), it should normalize to 0.0 linear light -> 0 in output sRGB
+    std::vector<uint8_t> testPixels(W * H * 4, 16);
+    for (int i = 0; i < W * H; ++i) {
+        testPixels[i * 4 + 3] = 255;
+    }
+
+    lumacore::CameraColorMetadata meta;
+    meta.blackLevel[0] = 16.0f;
+    meta.blackLevel[1] = 16.0f;
+    meta.blackLevel[2] = 16.0f;
+    meta.blackLevel[3] = 16.0f;
+    meta.whiteLevel = 255.0f;
+    meta.colorGains[0] = 1.0f;
+    meta.colorGains[1] = 1.0f;
+    meta.colorGains[2] = 1.0f;
+    meta.colorGains[3] = 1.0f;
+    meta.radialVignetteGain = 0.0f;
+
+    lumacore::applySensorColorCorrection(testPixels.data(), W, H, meta);
+
+    for (int i = 0; i < W * H; ++i) {
+        assert(testPixels[i * 4 + 0] == 0);
+        assert(testPixels[i * 4 + 1] == 0);
+        assert(testPixels[i * 4 + 2] == 0);
+        assert(testPixels[i * 4 + 3] == 255);
+    }
+    std::cout << "  Black-level subtraction verified (pixel value 16 -> 0)." << std::endl;
+
+    // Test 3: White-balance gain scaling
+    // Input flat gray (128). Set red gain 1.4, blue gain 0.7.
+    std::vector<uint8_t> wbPixels(W * H * 4, 128);
+    for (int i = 0; i < W * H; ++i) {
+        wbPixels[i * 4 + 3] = 255;
+    }
+
+    lumacore::CameraColorMetadata wbMeta;
+    wbMeta.blackLevel[0] = 0.0f;
+    wbMeta.blackLevel[1] = 0.0f;
+    wbMeta.blackLevel[2] = 0.0f;
+    wbMeta.blackLevel[3] = 0.0f;
+    wbMeta.whiteLevel = 255.0f;
+    wbMeta.colorGains[0] = 1.4f; // Red gain
+    wbMeta.colorGains[1] = 1.0f; // Green gain
+    wbMeta.colorGains[2] = 1.0f;
+    wbMeta.colorGains[3] = 0.7f; // Blue gain
+    wbMeta.radialVignetteGain = 0.0f;
+
+    lumacore::applySensorColorCorrection(wbPixels.data(), W, H, wbMeta);
+
+    // Verify R > G and G > B
+    assert(wbPixels[0] > wbPixels[1]);
+    assert(wbPixels[1] > wbPixels[2]);
+    std::cout << "  White balance scaling verified (R=" << static_cast<int>(wbPixels[0])
+              << " > G=" << static_cast<int>(wbPixels[1])
+              << " > B=" << static_cast<int>(wbPixels[2]) << ")." << std::endl;
+
+    // Test 4: 3x3 Color transform matrix (channel swap matrix: R and B swapped)
+    std::vector<uint8_t> ctmPixels(W * H * 4, 0);
+    // Fill first pixel: R=200, G=100, B=50
+    ctmPixels[0] = 200;
+    ctmPixels[1] = 100;
+    ctmPixels[2] = 50;
+    ctmPixels[3] = 255;
+
+    lumacore::CameraColorMetadata ctmMeta;
+    ctmMeta.blackLevel[0] = 0.0f;
+    ctmMeta.blackLevel[1] = 0.0f;
+    ctmMeta.blackLevel[2] = 0.0f;
+    ctmMeta.blackLevel[3] = 0.0f;
+    ctmMeta.whiteLevel = 255.0f;
+    // Swap R and B channels:
+    ctmMeta.colorTransform[0] = 0.0f; ctmMeta.colorTransform[1] = 0.0f; ctmMeta.colorTransform[2] = 1.0f;
+    ctmMeta.colorTransform[3] = 0.0f; ctmMeta.colorTransform[4] = 1.0f; ctmMeta.colorTransform[5] = 0.0f;
+    ctmMeta.colorTransform[6] = 1.0f; ctmMeta.colorTransform[7] = 0.0f; ctmMeta.colorTransform[8] = 0.0f;
+
+    lumacore::applySensorColorCorrection(ctmPixels.data(), W, H, ctmMeta);
+
+    // With R and B swapped, output B should be greater than output R
+    assert(ctmPixels[2] > ctmPixels[0]);
+    std::cout << "  3x3 Color matrix channel swap verified (output R="
+              << static_cast<int>(ctmPixels[0]) << ", output B=" << static_cast<int>(ctmPixels[2]) << ")." << std::endl;
+
+    // Test 5: End-to-end processCalibratedSensorPipeline with radial lens vignette
+    std::vector<uint8_t> calY(W * H, 100);
+    std::vector<uint8_t> calU((W / 2) * (H / 2), 128);
+    std::vector<uint8_t> calV((W / 2) * (H / 2), 128);
+    std::vector<uint8_t> calRgba(W * H * 4, 0);
+
+    lumacore::CameraColorMetadata endMeta;
+    endMeta.blackLevel[0] = 0.0f;
+    endMeta.blackLevel[1] = 0.0f;
+    endMeta.blackLevel[2] = 0.0f;
+    endMeta.blackLevel[3] = 0.0f;
+    endMeta.whiteLevel = 255.0f;
+    endMeta.radialVignetteGain = 2.0f; // Significant corner boost
+
+    lumacore::processCalibratedSensorPipeline(
+        calY.data(),
+        calU.data(),
+        calV.data(),
+        W,
+        H,
+        W,
+        W / 2,
+        1,
+        endMeta,
+        calRgba.data()
+    );
+
+    // Corner pixel (0,0) has distSq > 0, center pixel (4,4) has distSq ~ 0
+    const uint8_t cornerVal = calRgba[0]; // (0,0) R
+    const uint8_t centerVal = calRgba[(4 * W + 4) * 4]; // (4,4) R
+    assert(cornerVal > centerVal);
+    std::cout << "  Radial vignette compensation verified (corner="
+              << static_cast<int>(cornerVal) << " > center=" << static_cast<int>(centerVal) << ")." << std::endl;
+
+    std::cout << "[PASS] testColorCorrectionPipeline" << std::endl;
+}
+
 } // anonymous namespace
 
 int main() {
@@ -424,6 +577,7 @@ int main() {
     testBilateralGridSliceIdentity();
     testLaplacianVarianceSharpness();
     testSuperRes2xMerge();
-    std::cout << "=== ALL 8 NATIVE TESTS PASSED SUCCESSFULLY! ===" << std::endl;
+    testColorCorrectionPipeline();
+    std::cout << "=== ALL 9 NATIVE TESTS PASSED SUCCESSFULLY! ===" << std::endl;
     return 0;
 }

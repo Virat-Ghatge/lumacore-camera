@@ -49,6 +49,7 @@ class GlesBilateralUpsampler(
     private var uGridTexture0Loc: Int = -1
     private var uGridTexture1Loc: Int = -1
     private var uGridTexture2Loc: Int = -1
+    private var uSafetyBlendLoc: Int = -1
 
     private var quadVboId: Int = 0
     private var quadVaoId: Int = 0
@@ -155,6 +156,7 @@ class GlesBilateralUpsampler(
         uGridTexture0Loc = GLES30.glGetUniformLocation(programId, "uGridTexture0")
         uGridTexture1Loc = GLES30.glGetUniformLocation(programId, "uGridTexture1")
         uGridTexture2Loc = GLES30.glGetUniformLocation(programId, "uGridTexture2")
+        uSafetyBlendLoc = GLES30.glGetUniformLocation(programId, "uSafetyBlend")
 
         setupQuadBuffers()
     }
@@ -231,14 +233,16 @@ class GlesBilateralUpsampler(
      *
      * @param inputBitmap Full-resolution source image bitmap.
      * @param gridResult  3D bilateral grid affine coefficient tensor.
+     * @param safetyBlend Blending factor with original input [0.0f, 1.0f]. 1.0f = full enhancement, 0.0f = bypass.
      * @return [BilateralEnhanceResult] with the enhanced bitmap and execution latency in ms.
      */
     fun enhanceImage(
         inputBitmap: Bitmap,
-        gridResult: BilateralGridResult
+        gridResult: BilateralGridResult,
+        safetyBlend: Float = 1.0f
     ): BilateralEnhanceResult {
         if (!isEglInitialized || programId == 0) {
-            return enhanceImageCpuFallback(inputBitmap, gridResult)
+            return enhanceImageCpuFallback(inputBitmap, gridResult, safetyBlend)
         }
 
         return try {
@@ -246,7 +250,7 @@ class GlesBilateralUpsampler(
 
             if (!EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)) {
                 Log.w(TAG, "eglMakeCurrent failed in enhanceImage; delegating to CPU")
-                return enhanceImageCpuFallback(inputBitmap, gridResult)
+                return enhanceImageCpuFallback(inputBitmap, gridResult, safetyBlend)
             }
 
             val width = inputBitmap.width
@@ -322,6 +326,10 @@ class GlesBilateralUpsampler(
             GLES30.glBindTexture(GLES30.GL_TEXTURE_3D, gridTextures[2])
             GLES30.glUniform1i(uGridTexture2Loc, 3)
 
+            if (uSafetyBlendLoc >= 0) {
+                GLES30.glUniform1f(uSafetyBlendLoc, safetyBlend.coerceIn(0.0f, 1.0f))
+            }
+
             GLES30.glBindVertexArray(quadVaoId)
             GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
             GLES30.glBindVertexArray(0)
@@ -346,7 +354,7 @@ class GlesBilateralUpsampler(
             BilateralEnhanceResult(enhancedBitmap, executionMs)
         } catch (e: Exception) {
             Log.e(TAG, "GLES upsampling error: ${e.message}; falling back to CPU slicing", e)
-            enhanceImageCpuFallback(inputBitmap, gridResult)
+            enhanceImageCpuFallback(inputBitmap, gridResult, safetyBlend)
         }
     }
 
@@ -410,7 +418,8 @@ class GlesBilateralUpsampler(
      */
     fun enhanceImageCpuFallback(
         bitmap: Bitmap,
-        gridResult: BilateralGridResult
+        gridResult: BilateralGridResult,
+        safetyBlend: Float = 1.0f
     ): BilateralEnhanceResult {
         val width = bitmap.width
         val height = bitmap.height
@@ -444,7 +453,25 @@ class GlesBilateralUpsampler(
         return if (success) {
             outBuffer.rewind()
             val outBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            outBitmap.copyPixelsFromBuffer(outBuffer)
+            val clampedBlend = safetyBlend.coerceIn(0.0f, 1.0f)
+            if (clampedBlend < 0.999f) {
+                val inBytes = ByteArray(totalBytes)
+                val outBytes = ByteArray(totalBytes)
+                inBuffer.rewind()
+                inBuffer.get(inBytes)
+                outBuffer.get(outBytes)
+                val invBlend = 1.0f - clampedBlend
+                for (i in 0 until totalBytes step 4) {
+                    outBytes[i + 0] = ((outBytes[i + 0].toInt() and 0xFF) * clampedBlend + (inBytes[i + 0].toInt() and 0xFF) * invBlend).toInt().coerceIn(0, 255).toByte()
+                    outBytes[i + 1] = ((outBytes[i + 1].toInt() and 0xFF) * clampedBlend + (inBytes[i + 1].toInt() and 0xFF) * invBlend).toInt().coerceIn(0, 255).toByte()
+                    outBytes[i + 2] = ((outBytes[i + 2].toInt() and 0xFF) * clampedBlend + (inBytes[i + 2].toInt() and 0xFF) * invBlend).toInt().coerceIn(0, 255).toByte()
+                    outBytes[i + 3] = inBytes[i + 3]
+                }
+                val blendedBuffer = ByteBuffer.wrap(outBytes)
+                outBitmap.copyPixelsFromBuffer(blendedBuffer)
+            } else {
+                outBitmap.copyPixelsFromBuffer(outBuffer)
+            }
             BilateralEnhanceResult(outBitmap, executionMs)
         } else {
             // Passthrough copy if native slicing unavailable
@@ -518,6 +545,7 @@ uniform sampler2D uInputTexture;
 uniform sampler3D uGridTexture0;
 uniform sampler3D uGridTexture1;
 uniform sampler3D uGridTexture2;
+uniform float uSafetyBlend;
 void main() {
     vec4 color = texture(uInputTexture, vTexCoord);
     float luma = clamp(dot(color.rgb, vec3(0.299, 0.587, 0.114)), 0.0, 1.0);
@@ -529,7 +557,8 @@ void main() {
     enhanced.r = dot(affR.rgb, color.rgb) + affR.a;
     enhanced.g = dot(affG.rgb, color.rgb) + affG.a;
     enhanced.b = dot(affB.rgb, color.rgb) + affB.a;
-    FragColor = vec4(clamp(enhanced, 0.0, 1.0), color.a);
+    vec3 finalRgb = mix(color.rgb, clamp(enhanced, 0.0, 1.0), uSafetyBlend);
+    FragColor = vec4(finalRgb, color.a);
 }"""
     }
 }

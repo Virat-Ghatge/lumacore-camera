@@ -13,6 +13,7 @@ import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureFailure
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.params.MeteringRectangle
 import android.media.Image
@@ -22,6 +23,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
+import android.util.Range
 import android.view.Surface
 import androidx.core.content.ContextCompat
 import com.lumacore.camera.core.buffer.BoundedImageRingBuffer
@@ -40,8 +42,70 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.nio.ByteBuffer
 import java.util.Locale
+
+/**
+ * Extracted per-frame sensor color science metadata from TotalCaptureResult.
+ */
+data class FrameColorMetadata(
+    val blackLevels: FloatArray = floatArrayOf(16f, 16f, 16f, 16f),
+    val whiteLevel: Float = 255.0f,
+    val colorGains: FloatArray = floatArrayOf(1.8f, 1.0f, 1.0f, 1.5f),
+    val colorTransform: FloatArray = floatArrayOf(
+        1f, 0f, 0f,
+        0f, 1f, 0f,
+        0f, 0f, 1f
+    ),
+    val iso: Int = 100,
+    val exposureTimeNs: Long = 10_000_000L
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+        other as FrameColorMetadata
+        if (!blackLevels.contentEquals(other.blackLevels)) return false
+        if (whiteLevel != other.whiteLevel) return false
+        if (!colorGains.contentEquals(other.colorGains)) return false
+        if (!colorTransform.contentEquals(other.colorTransform)) return false
+        if (iso != other.iso) return false
+        if (exposureTimeNs != other.exposureTimeNs) return false
+        return true
+    }
+
+    override fun hashCode(): Int {
+        var result = blackLevels.contentHashCode()
+        result = 31 * result + whiteLevel.hashCode()
+        result = 31 * result + colorGains.contentHashCode()
+        result = 31 * result + colorTransform.contentHashCode()
+        result = 31 * result + iso
+        result = 31 * result + exposureTimeNs.hashCode()
+        return result
+    }
+}
+
+/**
+ * Reaped direct memory plane data decoupled from Camera2 Image lifecycle.
+ */
+class CapturedPlaneData(
+    val buffer: ByteBuffer,
+    val rowStride: Int,
+    val pixelStride: Int
+)
+
+/**
+ * Reaped frame carrier decoupled from bounded ring buffer and ImageReader,
+ * allowing immediate shutter release while background processing executes asynchronously.
+ */
+class CapturedFrameCarrier(
+    val width: Int,
+    val height: Int,
+    val format: Int,
+    val timestamp: Long,
+    val planes: List<CapturedPlaneData>
+)
 
 /**
  * Core Camera2 Capture Engine orchestrating camera lifecycle, real-time preview,
@@ -58,11 +122,26 @@ class Camera2CaptureEngine(
     private val cameraHandler: Handler = Handler(cameraThread.looper)
 
     private val engineScope: CoroutineScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private val processingScope: CoroutineScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private val processingMutex: Mutex = Mutex()
     val ringBuffer: BoundedImageRingBuffer = BoundedImageRingBuffer(maxCapacity = 10)
     private val gyroSampler: GyroscopeSampler = GyroscopeSampler(context)
     private val onnxEngine: BilateralGridInferenceEngine = BilateralGridInferenceEngine(context)
     private val glUpsampler: GlesBilateralUpsampler = GlesBilateralUpsampler(context)
     var latestTelemetrySummary: String? = null
+    var latestPreviewResult: TotalCaptureResult? = null
+        private set
+
+    private val previewCaptureCallback: CameraCaptureSession.CaptureCallback =
+        object : CameraCaptureSession.CaptureCallback() {
+            override fun onCaptureCompleted(
+                session: CameraCaptureSession,
+                request: CaptureRequest,
+                result: TotalCaptureResult
+            ) {
+                latestPreviewResult = result
+            }
+        }
 
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
@@ -189,7 +268,7 @@ class Camera2CaptureEngine(
             applyExposureCompensation(builder, currentExposureCompensation)
 
             previewRequestBuilder = builder
-            session.setRepeatingRequest(builder.build(), null, cameraHandler)
+            session.setRepeatingRequest(builder.build(), previewCaptureCallback, cameraHandler)
 
             hardwareProfile?.let { profile -> onReady(profile) }
         } catch (e: Exception) {
@@ -227,7 +306,7 @@ class Camera2CaptureEngine(
 
             // Resume continuous AF
             builder.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_IDLE)
-            session.setRepeatingRequest(builder.build(), null, cameraHandler)
+            session.setRepeatingRequest(builder.build(), previewCaptureCallback, cameraHandler)
         } catch (e: Exception) {
             Log.w(TAG, "Failed to apply tap to focus", e)
         }
@@ -246,7 +325,7 @@ class Camera2CaptureEngine(
 
         try {
             applyExposureCompensation(builder, clampedEv)
-            session.setRepeatingRequest(builder.build(), null, cameraHandler)
+            session.setRepeatingRequest(builder.build(), previewCaptureCallback, cameraHandler)
         } catch (e: Exception) {
             Log.w(TAG, "Failed to update exposure compensation", e)
         }
@@ -265,7 +344,7 @@ class Camera2CaptureEngine(
 
         try {
             applyZoom(builder, clampedZoom)
-            session.setRepeatingRequest(builder.build(), null, cameraHandler)
+            session.setRepeatingRequest(builder.build(), previewCaptureCallback, cameraHandler)
         } catch (e: Exception) {
             Log.w(TAG, "Failed to update zoom ratio", e)
         }
@@ -291,10 +370,13 @@ class Camera2CaptureEngine(
 
     /**
      * Executes atomic burst capture sequence according to strategy rules,
-     * drains frames safely from bounded ring buffer, and persists output to MediaStore.
+     * immediately reaps frame planes and releases the shutter lock,
+     * and asynchronously dispatches alignment, color science, and neural enhancement
+     * to a background queue.
      */
     fun captureBurst(
         strategy: CaptureModeStrategy,
+        onBurstCaptured: () -> Unit = {},
         onProgress: (Float) -> Unit,
         onComplete: (Uri?) -> Unit
     ): Unit {
@@ -311,6 +393,7 @@ class Camera2CaptureEngine(
         if (device == null || session == null || imageReader == null || profile == null) {
             Log.e(TAG, "Camera not ready for capture")
             ringBuffer.releaseShutterLock()
+            onBurstCaptured()
             onComplete(null)
             return
         }
@@ -318,6 +401,12 @@ class Camera2CaptureEngine(
         ringBuffer.clear()
         gyroSampler.startSampling()
         val totalFrames = strategy.burstCount
+
+        // Dynamic Metering: Inspect latest preview result to detect low light
+        val previewResult = latestPreviewResult
+        val previewIso: Int = previewResult?.get(CaptureResult.SENSOR_SENSITIVITY) ?: 100
+        val previewExpTimeNs: Long = previewResult?.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: 10_000_000L
+        val isLowLight: Boolean = previewIso > 400 || previewExpTimeNs > 30_000_000L
 
         try {
             val requests = mutableListOf<CaptureRequest>()
@@ -327,10 +416,24 @@ class Camera2CaptureEngine(
                 strategy.configureCapture(builder, profile.tier, i, totalFrames)
                 applyZoom(builder, currentZoomRatio)
                 applyExposureCompensation(builder, currentExposureCompensation)
+
+                if (isLowLight) {
+                    // Shutter Ceiling: Clamp shutter duration <= 33ms (1/30s) to prevent handshake blur
+                    builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(30, 60))
+                    try {
+                        builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, minOf(previewExpTimeNs, 33_333_333L))
+                    } catch (_: Exception) {}
+                    // Enforce underexposure bracketing ceiling (never positive EV in low light)
+                    val currentEv = builder.get(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION) ?: 0
+                    builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, minOf(currentEv, 0))
+                }
+
                 requests.add(builder.build())
             }
 
             var framesDelivered = 0
+            val burstMetadataList = mutableListOf<FrameColorMetadata>()
+
             session.captureBurst(
                 requests,
                 object : CameraCaptureSession.CaptureCallback() {
@@ -340,8 +443,54 @@ class Camera2CaptureEngine(
                         result: TotalCaptureResult
                     ) {
                         framesDelivered++
-                        val progress = (framesDelivered.toFloat() / totalFrames.toFloat()) * 0.7f
+                        val progress = (framesDelivered.toFloat() / totalFrames.toFloat()) * 0.4f
                         onProgress(progress)
+
+                        // Per-frame Metadata Extraction
+                        val rggb = result.get(CaptureResult.COLOR_CORRECTION_GAINS)
+                        val colorGains = if (rggb != null) {
+                            floatArrayOf(rggb.red, rggb.greenEven, rggb.greenOdd, rggb.blue)
+                        } else {
+                            floatArrayOf(1.8f, 1.0f, 1.0f, 1.5f)
+                        }
+
+                        val cst = result.get(CaptureResult.COLOR_CORRECTION_TRANSFORM)
+                        val colorTransform = FloatArray(9)
+                        if (cst != null) {
+                            for (r in 0 until 3) {
+                                for (c in 0 until 3) {
+                                    colorTransform[r * 3 + c] = cst.getElement(r, c).toFloat()
+                                }
+                            }
+                        } else {
+                            colorTransform[0] = 1.0f
+                            colorTransform[4] = 1.0f
+                            colorTransform[8] = 1.0f
+                        }
+
+                        val dynBlack = result.get(CaptureResult.SENSOR_DYNAMIC_BLACK_LEVEL)
+                        val blackLevels = if (dynBlack != null && dynBlack.size >= 4) {
+                            floatArrayOf(dynBlack[0], dynBlack[1], dynBlack[2], dynBlack[3])
+                        } else {
+                            floatArrayOf(16f, 16f, 16f, 16f)
+                        }
+
+                        val dynWhite = result.get(CaptureResult.SENSOR_DYNAMIC_WHITE_LEVEL)
+                        val whiteLevel = dynWhite?.toFloat() ?: 255.0f
+
+                        val iso = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: previewIso
+                        val exposureTimeNs = result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: previewExpTimeNs
+
+                        burstMetadataList.add(
+                            FrameColorMetadata(
+                                blackLevels = blackLevels,
+                                whiteLevel = whiteLevel,
+                                colorGains = colorGains,
+                                colorTransform = colorTransform,
+                                iso = iso,
+                                exposureTimeNs = exposureTimeNs
+                            )
+                        )
                     }
 
                     override fun onCaptureSequenceCompleted(
@@ -350,7 +499,14 @@ class Camera2CaptureEngine(
                         frameNumber: Long
                     ) {
                         engineScope.launch {
-                            processAndSaveDrainedFrames(strategy, onProgress, onComplete)
+                            drainReapAndDispatchBackground(
+                                totalFrames = totalFrames,
+                                strategy = strategy,
+                                burstMetadataList = burstMetadataList.toList(),
+                                onBurstCaptured = onBurstCaptured,
+                                onProgress = onProgress,
+                                onComplete = onComplete
+                            )
                         }
                     }
 
@@ -361,6 +517,9 @@ class Camera2CaptureEngine(
                     ) {
                         Log.e(TAG, "Capture failed with reason: ${failure.reason}")
                         gyroSampler.stopSampling()
+                        ringBuffer.releaseShutterLock()
+                        onBurstCaptured()
+                        onComplete(null)
                     }
                 },
                 cameraHandler
@@ -369,97 +528,228 @@ class Camera2CaptureEngine(
             Log.e(TAG, "Error initiating burst capture", e)
             gyroSampler.stopSampling()
             ringBuffer.releaseShutterLock()
+            onBurstCaptured()
             onComplete(null)
         }
     }
 
-    private suspend fun processAndSaveDrainedFrames(
+    private suspend fun drainReapAndDispatchBackground(
+        totalFrames: Int,
         strategy: CaptureModeStrategy,
+        burstMetadataList: List<FrameColorMetadata>,
+        onBurstCaptured: () -> Unit,
         onProgress: (Float) -> Unit,
         onComplete: (Uri?) -> Unit
     ): Unit {
         try {
             // Await frames arrival into ring buffer from ImageReader callback
-            var frames: List<Image> = ringBuffer.drainFrames(strategy.burstCount)
+            var frames: List<Image> = ringBuffer.drainFrames(totalFrames)
             var attempts = 0
-            while (frames.size < strategy.burstCount && attempts < 15) {
-                delay(40L)
-                val more = ringBuffer.drainFrames(strategy.burstCount - frames.size)
+            while (frames.size < totalFrames && attempts < 15) {
+                delay(30L)
+                val more = ringBuffer.drainFrames(totalFrames - frames.size)
                 if (more.isNotEmpty()) {
                     frames = frames + more
                 }
                 attempts++
             }
 
-            onProgress(0.85f)
-
             if (frames.isEmpty()) {
                 Log.e(TAG, "No frames drained from ring buffer")
                 gyroSampler.stopSampling()
+                ringBuffer.releaseShutterLock()
+                onBurstCaptured()
                 onComplete(null)
                 return
             }
 
-            val orientation = hardwareProfile?.sensorOrientation ?: 90
-            val savedUri: Uri?
+            val frameCount = frames.size
+            val refTimestampNs = frames[0].timestamp
+            val gyroRotations = FloatArray((frameCount - 1) * 3)
 
-            if (frames.size == 1 || !NativePipeline.isNativeReady() || frames[0].format != ImageFormat.YUV_420_888) {
-                // Select primary frame for direct single frame enhance & save
-                val selectedFrame: Image = frames[frames.size / 2]
-                savedUri = processSingleFrameAndSave(selectedFrame, strategy, orientation)
-            } else {
-                // Multi-frame burst fusion with specialized mode pipeline
-                savedUri = mergeBurstFramesAndSave(frames, strategy, orientation)
+            for (k in 1 until frameCount) {
+                val targetTimestampNs = frames[k].timestamp
+                val rot = gyroSampler.integrateRotationBetween(refTimestampNs, targetTimestampNs)
+                val baseIdx = (k - 1) * 3
+                gyroRotations[baseIdx + 0] = rot[0]
+                gyroRotations[baseIdx + 1] = rot[1]
+                gyroRotations[baseIdx + 2] = rot[2]
             }
+            gyroSampler.stopSampling()
 
-            // Safely close every drained frame
-            for (frame in frames) {
-                try {
-                    frame.close()
-                } catch (e: Exception) {
-                    Log.w(TAG, "Error closing frame in drain cleanup", e)
-                }
+            // 1. Decouple from ImageReader by copying planes into direct memory carriers & closing frames
+            val carriers = reapPlanesAndCloseImages(frames)
+
+            // 2. Release shutter lock IMMEDIATELY so camera is unblocked for next photo!
+            ringBuffer.releaseShutterLock()
+
+            // 3. Notify ViewModel that burst is ingested (shutter button springs back ready)
+            onBurstCaptured()
+
+            // 4. Launch heavy processing on background processingScope (Dispatchers.Default)
+            processingScope.launch {
+                executeBackgroundProcessingQueue(
+                    carriers = carriers,
+                    strategy = strategy,
+                    gyroRotations = gyroRotations,
+                    metadataList = burstMetadataList,
+                    onProgress = onProgress,
+                    onComplete = onComplete
+                )
             }
-
-            onProgress(1.0f)
-            onComplete(savedUri)
         } catch (e: Exception) {
-            Log.e(TAG, "Error in processAndSaveDrainedFrames", e)
-            onComplete(null)
-        } finally {
+            Log.e(TAG, "Error in drainReapAndDispatchBackground", e)
             gyroSampler.stopSampling()
             ringBuffer.releaseShutterLock()
+            onBurstCaptured()
+            onComplete(null)
         }
     }
 
-    private suspend fun processSingleFrameAndSave(
-        frame: Image,
+    private fun reapPlanesAndCloseImages(frames: List<Image>): List<CapturedFrameCarrier> {
+        val carriers = ArrayList<CapturedFrameCarrier>(frames.size)
+        for (frame in frames) {
+            try {
+                val planeList = ArrayList<CapturedPlaneData>(frame.planes.size)
+                for (plane in frame.planes) {
+                    val srcBuf = plane.buffer
+                    srcBuf.rewind()
+                    val directBuf = ByteBuffer.allocateDirect(srcBuf.remaining())
+                    directBuf.put(srcBuf)
+                    directBuf.rewind()
+                    srcBuf.rewind()
+                    planeList.add(CapturedPlaneData(directBuf, plane.rowStride, plane.pixelStride))
+                }
+                carriers.add(
+                    CapturedFrameCarrier(
+                        width = frame.width,
+                        height = frame.height,
+                        format = frame.format,
+                        timestamp = frame.timestamp,
+                        planes = planeList
+                    )
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to reap planes from frame", e)
+            } finally {
+                try {
+                    frame.close()
+                } catch (closeEx: Exception) {
+                    Log.w(TAG, "Error closing drained frame", closeEx)
+                }
+            }
+        }
+        return carriers
+    }
+
+    private suspend fun executeBackgroundProcessingQueue(
+        carriers: List<CapturedFrameCarrier>,
         strategy: CaptureModeStrategy,
+        gyroRotations: FloatArray,
+        metadataList: List<FrameColorMetadata>,
+        onProgress: (Float) -> Unit,
+        onComplete: (Uri?) -> Unit
+    ): Unit {
+        processingMutex.withLock {
+            try {
+                onProgress(0.6f)
+                val orientation = hardwareProfile?.sensorOrientation ?: 90
+                val savedUri: Uri?
+
+                if (carriers.size == 1 || !NativePipeline.isNativeReady() || carriers[0].format != ImageFormat.YUV_420_888) {
+                    val selectedCarrier = carriers[carriers.size / 2]
+                    savedUri = processSingleCarrierAndSave(
+                        carrier = selectedCarrier,
+                        strategy = strategy,
+                        metadata = metadataList.firstOrNull(),
+                        orientationDegrees = orientation
+                    )
+                } else {
+                    savedUri = mergeBurstCarriersAndSave(
+                        carriers = carriers,
+                        strategy = strategy,
+                        gyroRotations = gyroRotations,
+                        metadataList = metadataList,
+                        orientationDegrees = orientation
+                    )
+                }
+
+                onProgress(1.0f)
+                onComplete(savedUri)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in executeBackgroundProcessingQueue", e)
+                onComplete(null)
+            }
+        }
+    }
+
+    private suspend fun processSingleCarrierAndSave(
+        carrier: CapturedFrameCarrier,
+        strategy: CaptureModeStrategy,
+        metadata: FrameColorMetadata?,
         orientationDegrees: Int
     ): Uri? {
-        val jpegBytes = when (frame.format) {
-            ImageFormat.JPEG -> {
-                val buf = frame.planes[0].buffer
-                val bytes = ByteArray(buf.remaining())
-                buf.get(bytes)
-                bytes
+        val primaryMeta = metadata ?: FrameColorMetadata()
+        val width = carrier.width
+        val height = carrier.height
+
+        val bitmap: Bitmap? = if (carrier.format == ImageFormat.YUV_420_888 && carrier.planes.size >= 3 && NativePipeline.isNativeReady()) {
+            val yPlane = carrier.planes[0]
+            val uPlane = carrier.planes[1]
+            val vPlane = carrier.planes[2]
+            val outRgba = ByteBuffer.allocateDirect(width * height * 4)
+
+            val success = NativePipeline.nativeProcessColorPipeline(
+                yPlane = yPlane.buffer,
+                uPlane = uPlane.buffer,
+                vPlane = vPlane.buffer,
+                width = width,
+                height = height,
+                yRowStride = yPlane.rowStride,
+                uvRowStride = uPlane.rowStride,
+                uvPixelStride = uPlane.pixelStride,
+                blackLevel = primaryMeta.blackLevels,
+                whiteLevel = primaryMeta.whiteLevel,
+                colorGains = primaryMeta.colorGains,
+                colorTransform = primaryMeta.colorTransform,
+                iso = primaryMeta.iso,
+                exposureTimeNs = primaryMeta.exposureTimeNs,
+                radialVignetteGain = 0.15f,
+                outRgba = outRgba
+            )
+            if (success) {
+                outRgba.rewind()
+                val b = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                b.copyPixelsFromBuffer(outRgba)
+                b
+            } else {
+                null
             }
-            ImageFormat.YUV_420_888 -> MediaSaver.convertYuv420ToJpegBytes(frame)
-            else -> null
+        } else {
+            null
         }
 
-        if (jpegBytes == null) {
-            return MediaSaver.saveImage(context, frame, orientationDegrees)
+        val decodedBitmap: Bitmap = bitmap ?: run {
+            val buf = carrier.planes[0].buffer
+            buf.rewind()
+            val bytes = ByteArray(buf.remaining())
+            buf.get(bytes)
+            buf.rewind()
+            val decodeOptions = BitmapFactory.Options().apply { inMutable = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, decodeOptions)
+                ?: return MediaSaver.saveJpeg(
+                    context = context,
+                    jpegBytes = bytes,
+                    orientationDegrees = orientationDegrees,
+                    iso = primaryMeta.iso,
+                    exposureTimeSeconds = primaryMeta.exposureTimeNs / 1_000_000_000.0
+                )
         }
 
-        val decodeOptions = BitmapFactory.Options().apply { inMutable = true }
-        val bitmap = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size, decodeOptions)
-            ?: return MediaSaver.saveJpeg(context, jpegBytes, orientationDegrees)
-
-        val gridResult = onnxEngine.predictBilateralGrid(bitmap)
+        val gridResult = onnxEngine.predictBilateralGrid(decodedBitmap)
         val onnxMs = gridResult.latencyMs
 
-        val enhanceResult = glUpsampler.enhanceImage(bitmap, gridResult)
+        val enhanceResult = glUpsampler.enhanceImage(decodedBitmap, gridResult, gridResult.safetyBlend)
         val enhancedBitmap = enhanceResult.enhancedBitmap
         val glMs = enhanceResult.executionMs
 
@@ -467,42 +757,46 @@ class Camera2CaptureEngine(
         val totalMem = Runtime.getRuntime().totalMemory()
         val freeMem = Runtime.getRuntime().freeMemory()
         val usedRamMb = (totalMem - freeMem) / (1024 * 1024)
-        val telemetry = "Mode: ${strategy.mode.name} | Tier: $tier | Align: 0.0ms | Merge: 0.0ms | ONNX: ${String.format(Locale.US, "%.1f", onnxMs)}ms | GL: ${String.format(Locale.US, "%.1f", glMs)}ms | Ghost: 0.0% | RAM: ${usedRamMb}MB"
+        val telemetry = "Mode: ${strategy.mode.name} | Tier: $tier | Align: 0.0ms | Merge: 0.0ms | ONNX: ${String.format(Locale.US, "%.1f", onnxMs)}ms | GL: ${String.format(Locale.US, "%.1f", glMs)}ms | RAM: ${usedRamMb}MB"
         Log.i(TAG, telemetry)
         latestTelemetrySummary = telemetry
 
         val savedUri = MediaSaver.saveBitmap(
             context = context,
             bitmap = enhancedBitmap,
-            orientationDegrees = orientationDegrees
+            orientationDegrees = orientationDegrees,
+            iso = primaryMeta.iso,
+            exposureTimeSeconds = primaryMeta.exposureTimeNs / 1_000_000_000.0
         )
 
-        bitmap.recycle()
-        if (enhancedBitmap !== bitmap) {
+        decodedBitmap.recycle()
+        if (enhancedBitmap !== decodedBitmap) {
             enhancedBitmap.recycle()
         }
 
         return savedUri
     }
 
-    private suspend fun mergeBurstFramesAndSave(
-        rawFrames: List<Image>,
+    private suspend fun mergeBurstCarriersAndSave(
+        carriers: List<CapturedFrameCarrier>,
         strategy: CaptureModeStrategy,
+        gyroRotations: FloatArray,
+        metadataList: List<FrameColorMetadata>,
         orientationDegrees: Int
     ): Uri? {
-        val frameCount = rawFrames.size
-        val width = rawFrames[0].width
-        val height = rawFrames[0].height
+        val frameCount = carriers.size
+        val width = carriers[0].width
+        val height = carriers[0].height
 
-        val yRowStride = rawFrames[0].planes[0].rowStride
-        val uvRowStride = rawFrames[0].planes[1].rowStride
-        val uvPixelStride = rawFrames[0].planes[1].pixelStride
+        val yRowStride = carriers[0].planes[0].rowStride
+        val uvRowStride = carriers[0].planes[1].rowStride
+        val uvPixelStride = carriers[0].planes[1].pixelStride
 
         // Action Anti-Blur Mode: Select sharpest frame as reference
-        val frames: List<Image> = if (strategy.mode == com.lumacore.camera.core.model.CaptureMode.ACTION && frameCount > 1) {
+        val orderedCarriers: List<CapturedFrameCarrier> = if (strategy.mode == com.lumacore.camera.core.model.CaptureMode.ACTION && frameCount > 1) {
             val yBuffers = Array(frameCount) { i ->
-                rawFrames[i].planes[0].buffer.rewind()
-                rawFrames[i].planes[0].buffer
+                carriers[i].planes[0].buffer.rewind()
+                carriers[i].planes[0].buffer
             }
             val sharpestIndex = NativePipeline.nativeSelectSharpestFrame(
                 lumaPlanes = yBuffers,
@@ -512,12 +806,12 @@ class Camera2CaptureEngine(
             )
             Log.i(TAG, "Action Anti-Blur: Frame $sharpestIndex selected as sharpest reference")
             if (sharpestIndex > 0 && sharpestIndex < frameCount) {
-                listOf(rawFrames[sharpestIndex]) + rawFrames.filterIndexed { index, _ -> index != sharpestIndex }
+                listOf(carriers[sharpestIndex]) + carriers.filterIndexed { index, _ -> index != sharpestIndex }
             } else {
-                rawFrames
+                carriers
             }
         } else {
-            rawFrames
+            carriers
         }
 
         val outY: ByteBuffer
@@ -536,7 +830,7 @@ class Camera2CaptureEngine(
 
             val cropYBuffers = Array(frameCount) { i ->
                 val buf = ByteBuffer.allocateDirect(cropW * cropH)
-                val srcBuf = frames[i].planes[0].buffer
+                val srcBuf = orderedCarriers[i].planes[0].buffer
                 srcBuf.rewind()
                 for (r in 0 until cropH) {
                     srcBuf.position((cropY + r) * yRowStride + cropX)
@@ -576,8 +870,8 @@ class Camera2CaptureEngine(
             outU = ByteBuffer.allocateDirect(halfW * halfH)
             outV = ByteBuffer.allocateDirect(halfW * halfH)
 
-            val refU = frames[0].planes[1].buffer
-            val refV = frames[0].planes[2].buffer
+            val refU = orderedCarriers[0].planes[1].buffer
+            val refV = orderedCarriers[0].planes[2].buffer
             refU.rewind()
             refV.rewind()
 
@@ -596,28 +890,16 @@ class Camera2CaptureEngine(
         } else {
             // Standard / Night / Action Gyro-Assisted Pyramid Burst Fusion
             val yPlanes = Array(frameCount) { i ->
-                frames[i].planes[0].buffer.rewind()
-                frames[i].planes[0].buffer
+                orderedCarriers[i].planes[0].buffer.rewind()
+                orderedCarriers[i].planes[0].buffer
             }
             val uPlanes = Array(frameCount) { i ->
-                frames[i].planes[1].buffer.rewind()
-                frames[i].planes[1].buffer
+                orderedCarriers[i].planes[1].buffer.rewind()
+                orderedCarriers[i].planes[1].buffer
             }
             val vPlanes = Array(frameCount) { i ->
-                frames[i].planes[2].buffer.rewind()
-                frames[i].planes[2].buffer
-            }
-
-            val refTimestampNs = frames[0].timestamp
-            val gyroRotations = FloatArray((frameCount - 1) * 3)
-
-            for (k in 1 until frameCount) {
-                val targetTimestampNs = frames[k].timestamp
-                val rot = gyroSampler.integrateRotationBetween(refTimestampNs, targetTimestampNs)
-                val baseIdx = (k - 1) * 3
-                gyroRotations[baseIdx + 0] = rot[0]
-                gyroRotations[baseIdx + 1] = rot[1]
-                gyroRotations[baseIdx + 2] = rot[2]
+                orderedCarriers[i].planes[2].buffer.rewind()
+                orderedCarriers[i].planes[2].buffer
             }
 
             outY = ByteBuffer.allocateDirect(width * height)
@@ -660,31 +942,58 @@ class Camera2CaptureEngine(
             }
         }
 
-        val jpegBytes = MediaSaver.convertPlanarYuvToJpegBytes(
-            outY = outY,
-            outU = outU,
-            outV = outV,
+        // Direct YUV -> RGBA Sensor Color Pipeline (Zero Double JPEG)
+        val outRgba = ByteBuffer.allocateDirect(width * height * 4)
+        outY.rewind()
+        outU.rewind()
+        outV.rewind()
+
+        val primaryMeta = metadataList.firstOrNull() ?: FrameColorMetadata()
+
+        val colorStart = System.currentTimeMillis()
+        val colorSuccess = NativePipeline.nativeProcessColorPipeline(
+            yPlane = outY,
+            uPlane = outU,
+            vPlane = outV,
             width = width,
-            height = height
+            height = height,
+            yRowStride = width,
+            uvRowStride = width / 2,
+            uvPixelStride = 1,
+            blackLevel = primaryMeta.blackLevels,
+            whiteLevel = primaryMeta.whiteLevel,
+            colorGains = primaryMeta.colorGains,
+            colorTransform = primaryMeta.colorTransform,
+            iso = primaryMeta.iso,
+            exposureTimeNs = primaryMeta.exposureTimeNs,
+            radialVignetteGain = 0.15f,
+            outRgba = outRgba
         )
+        val colorMs = (System.currentTimeMillis() - colorStart).toFloat()
 
-        val totalMem = Runtime.getRuntime().totalMemory()
-        val freeMem = Runtime.getRuntime().freeMemory()
-        val usedRamMb = (totalMem - freeMem) / (1024 * 1024)
-        val tier = hardwareProfile?.tier?.name ?: "TIER_1_RAW_BURST"
-
-        val decodeOptions = BitmapFactory.Options().apply { inMutable = true }
-        val mergedBitmap = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size, decodeOptions)
-
-        if (mergedBitmap == null) {
-            val fallbackTelemetry = "Mode: ${strategy.mode.name} | Tier: $tier | Align: ${String.format(Locale.US, "%.1f", alignMs)}ms | Merge: ${String.format(Locale.US, "%.1f", mergeMs)}ms | ONNX: 0.0ms | GL: 0.0ms | Ghost: ${String.format(Locale.US, "%.1f", ghostRatio)}% | RAM: ${usedRamMb}MB"
-            Log.i(TAG, fallbackTelemetry)
-            latestTelemetrySummary = fallbackTelemetry
-            return MediaSaver.saveJpeg(
-                context = context,
-                jpegBytes = jpegBytes,
-                orientationDegrees = orientationDegrees
+        val mergedBitmap: Bitmap
+        if (colorSuccess) {
+            outRgba.rewind()
+            mergedBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            mergedBitmap.copyPixelsFromBuffer(outRgba)
+        } else {
+            // Fallback: Planar YUV to JPEG bytes then decode
+            val jpegBytes = MediaSaver.convertPlanarYuvToJpegBytes(
+                outY = outY,
+                outU = outU,
+                outV = outV,
+                width = width,
+                height = height
             )
+            val decodeOptions = BitmapFactory.Options().apply { inMutable = true }
+            mergedBitmap = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size, decodeOptions)
+                ?: return MediaSaver.saveJpeg(
+                    context = context,
+                    jpegBytes = jpegBytes,
+                    orientationDegrees = orientationDegrees,
+                    iso = primaryMeta.iso,
+                    exposureTimeSeconds = primaryMeta.exposureTimeNs / 1_000_000_000.0
+                )
         }
 
         // Run neural bilateral grid inference on merged frame
@@ -692,18 +1001,24 @@ class Camera2CaptureEngine(
         val onnxMs = gridResult.latencyMs
 
         // Run full-resolution OpenGL ES 3.0 bilateral slicing
-        val enhanceResult = glUpsampler.enhanceImage(mergedBitmap, gridResult)
+        val enhanceResult = glUpsampler.enhanceImage(mergedBitmap, gridResult, gridResult.safetyBlend)
         val enhancedBitmap = enhanceResult.enhancedBitmap
         val glMs = enhanceResult.executionMs
 
-        val telemetry = "Mode: ${strategy.mode.name} | Tier: $tier | Align: ${String.format(Locale.US, "%.1f", alignMs)}ms | Merge: ${String.format(Locale.US, "%.1f", mergeMs)}ms | ONNX: ${String.format(Locale.US, "%.1f", onnxMs)}ms | GL: ${String.format(Locale.US, "%.1f", glMs)}ms | Ghost: ${String.format(Locale.US, "%.1f", ghostRatio)}% | RAM: ${usedRamMb}MB"
+        val tier = hardwareProfile?.tier?.name ?: "TIER_1_RAW_BURST"
+        val totalMem = Runtime.getRuntime().totalMemory()
+        val freeMem = Runtime.getRuntime().freeMemory()
+        val usedRamMb = (totalMem - freeMem) / (1024 * 1024)
+        val telemetry = "Mode: ${strategy.mode.name} | Tier: $tier | Color: ${String.format(Locale.US, "%.1f", colorMs)}ms | Align: ${String.format(Locale.US, "%.1f", alignMs)}ms | Merge: ${String.format(Locale.US, "%.1f", mergeMs)}ms | ONNX: ${String.format(Locale.US, "%.1f", onnxMs)}ms | GL: ${String.format(Locale.US, "%.1f", glMs)}ms | Safety: ${String.format(Locale.US, "%.2f", gridResult.safetyBlend)} | Ghost: ${String.format(Locale.US, "%.1f", ghostRatio)}% | RAM: ${usedRamMb}MB"
         Log.i(TAG, telemetry)
         latestTelemetrySummary = telemetry
 
         val savedUri = MediaSaver.saveBitmap(
             context = context,
             bitmap = enhancedBitmap,
-            orientationDegrees = orientationDegrees
+            orientationDegrees = orientationDegrees,
+            iso = primaryMeta.iso,
+            exposureTimeSeconds = primaryMeta.exposureTimeNs / 1_000_000_000.0
         )
 
         mergedBitmap.recycle()

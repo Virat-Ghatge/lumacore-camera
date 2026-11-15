@@ -29,6 +29,8 @@ data class CameraUiState(
     val showGrid: Boolean = false,
     val showTelemetry: Boolean = true,
     val isCapturing: Boolean = false,
+    val isProcessingInBackground: Boolean = false,
+    val pendingJobsCount: Int = 0,
     val captureProgress: Float = 0.0f,
     val lastCapturedThumbnailUri: Uri? = null,
     val hardwareTier: HardwareTier = HardwareTier.TIER_1_RAW_BURST,

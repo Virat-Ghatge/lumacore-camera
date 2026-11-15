@@ -20,7 +20,8 @@ data class BilateralGridResult(
     val depth: Int = 8,
     val height: Int = 16,
     val width: Int = 16,
-    val latencyMs: Long = 0L
+    val latencyMs: Long = 0L,
+    val safetyBlend: Float = 1.0f
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -32,6 +33,7 @@ data class BilateralGridResult(
         if (height != other.height) return false
         if (width != other.width) return false
         if (latencyMs != other.latencyMs) return false
+        if (safetyBlend != other.safetyBlend) return false
         return true
     }
 
@@ -42,6 +44,7 @@ data class BilateralGridResult(
         result = 31 * result + height
         result = 31 * result + width
         result = 31 * result + latencyMs.hashCode()
+        result = 31 * result + safetyBlend.hashCode()
         return result
     }
 }
@@ -177,13 +180,65 @@ class BilateralGridInferenceEngine(
             results.close()
             inputTensor.close()
 
+            // 1. Inspect for NaN or Infinite values
+            var hasNanOrInf = false
+            for (v in gridData) {
+                if (v.isNaN() || v.isInfinite()) {
+                    hasNanOrInf = true
+                    break
+                }
+            }
+            if (hasNanOrInf) {
+                Log.w(TAG, "Anomaly: Bilateral grid contains NaN or Infinite values; replacing with identity grid.")
+                return createIdentityBilateralGrid()
+            }
+
+            // 2. Compute dynamic range and variance across coefficients
+            var minVal = Float.MAX_VALUE
+            var maxVal = -Float.MAX_VALUE
+            var sum = 0.0
+            for (v in gridData) {
+                if (v < minVal) minVal = v
+                if (v > maxVal) maxVal = v
+                sum += v.toDouble()
+            }
+            val mean = (sum / gridData.size).toFloat()
+            var sumSqDiff = 0.0
+            for (v in gridData) {
+                val diff = v - mean
+                sumSqDiff += (diff * diff).toDouble()
+            }
+            val variance = (sumSqDiff / gridData.size).toFloat()
+
+            // 3. Detect abnormalities, sanitize bounds, and compute calibrated safety blend factor
+            var safetyBlend = 1.0f
+            val isRangeAbnormal = maxVal > 3.0f || minVal < -1.0f
+            val isVarianceAbnormal = variance > 2.0f
+
+            if (isRangeAbnormal || isVarianceAbnormal) {
+                Log.w(
+                    TAG,
+                    "Coefficient anomaly detected (min=$minVal, max=$maxVal, variance=$variance). " +
+                    "Sanitizing grid coefficients and applying safety blend factor."
+                )
+                for (i in gridData.indices) {
+                    gridData[i] = gridData[i].coerceIn(-1.0f, 3.0f)
+                }
+                safetyBlend = when {
+                    maxVal > 5.0f || minVal < -2.5f || variance > 4.0f -> 0.50f
+                    maxVal > 4.0f || minVal < -1.8f || variance > 2.5f -> 0.70f
+                    else -> 0.85f
+                }
+            }
+
             BilateralGridResult(
                 gridData = gridData,
                 channels = GRID_CHANNELS,
                 depth = GRID_DEPTH,
                 height = GRID_HEIGHT,
                 width = GRID_WIDTH,
-                latencyMs = latencyMs
+                latencyMs = latencyMs,
+                safetyBlend = safetyBlend
             )
         } catch (e: Exception) {
             Log.e(TAG, "Inference error during predictBilateralGrid: ${e.message}", e)
@@ -201,7 +256,8 @@ class BilateralGridInferenceEngine(
             depth = GRID_DEPTH,
             height = GRID_HEIGHT,
             width = GRID_WIDTH,
-            latencyMs = 0L
+            latencyMs = 0L,
+            safetyBlend = 1.0f
         )
     }
 
