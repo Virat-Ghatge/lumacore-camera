@@ -59,6 +59,9 @@ fun CameraScreen(
                 onTimerToggle = viewModel::onTimerToggle,
                 onAspectRatioToggle = viewModel::onAspectRatioToggle,
                 onSettingsClick = viewModel::onSettingsOpen,
+                onToggleRawDng = viewModel::onToggleRawDng,
+                onToggleNeuralEngine = viewModel::onToggleNeuralEngine,
+                onToggleVideoStabilization = viewModel::onToggleVideoStabilization,
                 modifier = Modifier
                     .statusBarsPadding()
                     .padding(top = 4.dp)
@@ -132,12 +135,16 @@ fun CameraScreen(
                         }
                     }
 
-                    // Viewfinder Gesture & Reticle Controls Overlay
+                    // Viewfinder Gesture, Overlays, and Lens Switching Controls
                     ViewfinderControls(
                         uiState = uiState,
                         onTapToFocus = viewModel::onTapToFocus,
                         onZoomChange = viewModel::onZoomChange,
-                        onExposureCompensationChange = viewModel::onExposureCompensationChange
+                        onExposureCompensationChange = viewModel::onExposureCompensationChange,
+                        onLensSelected = viewModel::onLensSelected,
+                        onLongPressAeAfLock = viewModel::onLongPressAeAfLock,
+                        onUnlockAeAf = viewModel::onUnlockAeAf,
+                        onDismissScanner = viewModel::onDismissScanner
                     )
                 }
             }
@@ -149,6 +156,14 @@ fun CameraScreen(
                 onShutterClick = viewModel::onShutterClick,
                 onFlipCameraClick = viewModel::onLensFlip,
                 onGalleryClick = { /* Handled via Intent/PhotoPicker in M2 */ },
+                onIsoSelected = viewModel::onIsoSelected,
+                onShutterSpeedSelected = viewModel::onShutterSpeedSelected,
+                onFocusDistanceChanged = viewModel::onFocusDistanceChanged,
+                onWhiteBalanceKelvinChanged = viewModel::onWhiteBalanceKelvinChanged,
+                onToggleFocusPeaking = viewModel::onToggleFocusPeaking,
+                onToggleHistogram = viewModel::onToggleHistogram,
+                onApertureChanged = viewModel::onApertureChanged,
+                onVideoSnapshot = viewModel::onVideoSnapshot,
                 modifier = Modifier.navigationBarsPadding()
             )
         }
@@ -159,7 +174,10 @@ fun CameraScreen(
                 uiState = uiState,
                 onDismissRequest = viewModel::onSettingsDismiss,
                 onToggleGrid = viewModel::onToggleGrid,
-                onToggleTelemetry = viewModel::onToggleTelemetry
+                onToggleTelemetry = viewModel::onToggleTelemetry,
+                onToggleNeuralEngine = viewModel::onToggleNeuralEngine,
+                onToggleRawDng = viewModel::onToggleRawDng,
+                onToggleVideoStabilization = viewModel::onToggleVideoStabilization
             )
         }
     }

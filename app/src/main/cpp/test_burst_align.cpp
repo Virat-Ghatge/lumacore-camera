@@ -5,6 +5,7 @@
 #include "lumacore_sharpness.hpp"
 #include "lumacore_super_res.hpp"
 #include "lumacore_color_pipeline.hpp"
+#include "lumacore_histogram.hpp"
 
 #include <cassert>
 #include <chrono>
@@ -565,6 +566,59 @@ void testColorCorrectionPipeline() {
     std::cout << "[PASS] testColorCorrectionPipeline" << std::endl;
 }
 
+void testHistogramCalculation() {
+    std::cout << "[RUN] testHistogramCalculation..." << std::endl;
+    constexpr int W = 80;
+    constexpr int H = 60;
+    constexpr int totalPx = W * H;
+    std::vector<uint8_t> rgba(totalPx * 4);
+
+    for (int i = 0; i < totalPx; ++i) {
+        rgba[i * 4 + 0] = static_cast<uint8_t>(i % 256);
+        rgba[i * 4 + 1] = static_cast<uint8_t>((i * 3) % 256);
+        rgba[i * 4 + 2] = static_cast<uint8_t>((i * 7) % 256);
+        rgba[i * 4 + 3] = 255;
+    }
+
+    std::vector<int32_t> rBins(256, 0);
+    std::vector<int32_t> gBins(256, 0);
+    std::vector<int32_t> bBins(256, 0);
+    std::vector<int32_t> lumaBins(256, 0);
+
+    lumacore::computeRgbaHistogram(
+        rgba.data(),
+        W,
+        H,
+        rBins.data(),
+        gBins.data(),
+        bBins.data(),
+        lumaBins.data(),
+        256
+    );
+
+    int32_t sumR = 0;
+    int32_t sumG = 0;
+    int32_t sumB = 0;
+    int32_t sumLuma = 0;
+
+    for (int i = 0; i < 256; ++i) {
+        sumR += rBins[i];
+        sumG += gBins[i];
+        sumB += bBins[i];
+        sumLuma += lumaBins[i];
+    }
+
+    assert(sumR == totalPx);
+    assert(sumG == totalPx);
+    assert(sumB == totalPx);
+    assert(sumLuma == totalPx);
+
+    std::cout << "  Histogram sum verification: R=" << sumR << ", G=" << sumG
+              << ", B=" << sumB << ", Luma=" << sumLuma
+              << " matches totalPx=" << totalPx << std::endl;
+    std::cout << "[PASS] testHistogramCalculation" << std::endl;
+}
+
 } // anonymous namespace
 
 int main() {
@@ -578,6 +632,7 @@ int main() {
     testLaplacianVarianceSharpness();
     testSuperRes2xMerge();
     testColorCorrectionPipeline();
-    std::cout << "=== ALL 9 NATIVE TESTS PASSED SUCCESSFULLY! ===" << std::endl;
+    testHistogramCalculation();
+    std::cout << "=== ALL 10 NATIVE TESTS PASSED SUCCESSFULLY! ===" << std::endl;
     return 0;
 }

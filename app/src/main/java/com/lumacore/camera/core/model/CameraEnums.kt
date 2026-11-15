@@ -64,11 +64,12 @@ enum class AspectRatioSetting(val ratioX: Int, val ratioY: Int, val displayName:
  * Primary user-selectable capture modes.
  */
 enum class CaptureMode(val label: String) {
-    NIGHT("NIGHT"),
     PHOTO("PHOTO"),
+    NIGHT("NIGHT"),
+    PORTRAIT("PORTRAIT"),
+    PRO("PRO"),
     ACTION("ACTION"),
-    SUPER_RES_ZOOM("ZOOM+"),
-    VIDEO_V2("VIDEO (v2)")
+    VIDEO("VIDEO")
 }
 
 /**

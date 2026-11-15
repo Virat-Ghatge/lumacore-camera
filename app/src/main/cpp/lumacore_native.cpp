@@ -5,6 +5,7 @@
 #include "lumacore_sharpness.hpp"
 #include "lumacore_super_res.hpp"
 #include "lumacore_color_pipeline.hpp"
+#include "lumacore_histogram.hpp"
 
 #include <jni.h>
 #include <android/log.h>
@@ -594,6 +595,73 @@ Java_com_lumacore_camera_core_nativebridge_NativePipeline_nativeProcessColorPipe
         meta,
         outPtr
     );
+
+    return JNI_TRUE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_lumacore_camera_core_nativebridge_NativePipeline_nativeComputeHistogram(
+    JNIEnv* env,
+    jobject /* thiz */,
+    jobject rgbaBuffer,
+    jint width,
+    jint height,
+    jintArray outR,
+    jintArray outG,
+    jintArray outB,
+    jintArray outLuma
+) {
+    if (env == nullptr || rgbaBuffer == nullptr || outR == nullptr || outG == nullptr ||
+        outB == nullptr || outLuma == nullptr || width <= 0 || height <= 0) {
+        LOGE("nativeComputeHistogram: Invalid parameters or null pointers");
+        return JNI_FALSE;
+    }
+
+    const uint8_t* rgbaPtr = static_cast<const uint8_t*>(env->GetDirectBufferAddress(rgbaBuffer));
+    if (rgbaPtr == nullptr) {
+        LOGE("nativeComputeHistogram: rgbaBuffer is not a direct buffer or is null");
+        return JNI_FALSE;
+    }
+
+    const jsize rLen = env->GetArrayLength(outR);
+    const jsize gLen = env->GetArrayLength(outG);
+    const jsize bLen = env->GetArrayLength(outB);
+    const jsize lumaLen = env->GetArrayLength(outLuma);
+
+    if (rLen < 256 || gLen < 256 || bLen < 256 || lumaLen < 256) {
+        LOGE("nativeComputeHistogram: Output arrays must have at least 256 bins");
+        return JNI_FALSE;
+    }
+
+    jint* rPtr = env->GetIntArrayElements(outR, nullptr);
+    jint* gPtr = env->GetIntArrayElements(outG, nullptr);
+    jint* bPtr = env->GetIntArrayElements(outB, nullptr);
+    jint* lumaPtr = env->GetIntArrayElements(outLuma, nullptr);
+
+    if (rPtr == nullptr || gPtr == nullptr || bPtr == nullptr || lumaPtr == nullptr) {
+        LOGE("nativeComputeHistogram: Failed to acquire array elements");
+        if (rPtr) env->ReleaseIntArrayElements(outR, rPtr, JNI_ABORT);
+        if (gPtr) env->ReleaseIntArrayElements(outG, gPtr, JNI_ABORT);
+        if (bPtr) env->ReleaseIntArrayElements(outB, bPtr, JNI_ABORT);
+        if (lumaPtr) env->ReleaseIntArrayElements(outLuma, lumaPtr, JNI_ABORT);
+        return JNI_FALSE;
+    }
+
+    lumacore::computeRgbaHistogram(
+        rgbaPtr,
+        width,
+        height,
+        reinterpret_cast<int32_t*>(rPtr),
+        reinterpret_cast<int32_t*>(gPtr),
+        reinterpret_cast<int32_t*>(bPtr),
+        reinterpret_cast<int32_t*>(lumaPtr),
+        256
+    );
+
+    env->ReleaseIntArrayElements(outR, rPtr, 0);
+    env->ReleaseIntArrayElements(outG, gPtr, 0);
+    env->ReleaseIntArrayElements(outB, bPtr, 0);
+    env->ReleaseIntArrayElements(outLuma, lumaPtr, 0);
 
     return JNI_TRUE;
 }

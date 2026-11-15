@@ -7,6 +7,9 @@ import android.graphics.BitmapFactory
 import android.graphics.ImageFormat
 import android.graphics.Rect
 import android.graphics.YuvImage
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.DngCreator
+import android.hardware.camera2.TotalCaptureResult
 import android.media.Image
 import android.net.Uri
 import android.os.Build
@@ -122,6 +125,76 @@ object MediaSaver {
             iso = iso,
             exposureTimeSeconds = exposureTimeSeconds
         )
+    }
+
+    /**
+     * Writes raw DNG file directly to MediaStore via Camera2 DngCreator.
+     */
+    suspend fun saveDng(
+        context: Context,
+        characteristics: CameraCharacteristics,
+        captureResult: TotalCaptureResult,
+        rawImage: Image,
+        orientationDegrees: Int = 0
+    ): Uri? = withContext(Dispatchers.IO) {
+        val resolver = context.contentResolver
+        val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
+        val fileName = "LUMA_$timeStamp.dng"
+
+        val contentValues = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+            put(MediaStore.Images.Media.MIME_TYPE, "image/x-adobe-dng")
+            put(MediaStore.Images.Media.DATE_ADDED, System.currentTimeMillis() / 1000)
+            put(MediaStore.Images.Media.DATE_TAKEN, System.currentTimeMillis())
+            put(MediaStore.Images.Media.RELATIVE_PATH, DIRECTORY_NAME)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.Images.Media.IS_PENDING, 1)
+            }
+        }
+
+        val uri: Uri? = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+        if (uri == null) {
+            Log.e(TAG, "Failed to create MediaStore entry for DNG")
+            return@withContext null
+        }
+
+        try {
+            resolver.openOutputStream(uri)?.use { outputStream ->
+                val dngCreator = DngCreator(characteristics, captureResult)
+                dngCreator.setOrientation(orientationDegreesToDngOrientation(orientationDegrees))
+                dngCreator.writeImage(outputStream, rawImage)
+                dngCreator.close()
+            } ?: run {
+                Log.e(TAG, "Failed to open output stream for DNG: $uri")
+                return@withContext null
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                contentValues.clear()
+                contentValues.put(MediaStore.Images.Media.IS_PENDING, 0)
+                resolver.update(uri, contentValues, null, null)
+            }
+
+            Log.i(TAG, "DNG saved successfully: $uri ($fileName)")
+            return@withContext uri
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception writing DNG image", e)
+            try {
+                resolver.delete(uri, null, null)
+            } catch (delEx: Exception) {
+                Log.w(TAG, "Failed to clean incomplete DNG entry", delEx)
+            }
+            return@withContext null
+        }
+    }
+
+    private fun orientationDegreesToDngOrientation(degrees: Int): Int {
+        return when ((degrees % 360 + 360) % 360) {
+            90 -> ExifInterface.ORIENTATION_ROTATE_90
+            180 -> ExifInterface.ORIENTATION_ROTATE_180
+            270 -> ExifInterface.ORIENTATION_ROTATE_270
+            else -> ExifInterface.ORIENTATION_NORMAL
+        }
     }
 
     /**

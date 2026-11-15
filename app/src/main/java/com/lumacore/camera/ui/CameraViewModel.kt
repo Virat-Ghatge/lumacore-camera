@@ -8,6 +8,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.lumacore.camera.core.engine.Camera2CaptureEngine
 import com.lumacore.camera.core.hardware.HardwareProfile
+import com.lumacore.camera.core.hardware.PhysicalLensInfo
 import com.lumacore.camera.core.model.AspectRatioSetting
 import com.lumacore.camera.core.model.CaptureMode
 import com.lumacore.camera.core.model.FlashMode
@@ -16,6 +17,7 @@ import com.lumacore.camera.core.model.HdrMode
 import com.lumacore.camera.core.model.LensFacing
 import com.lumacore.camera.core.model.TimerSetting
 import com.lumacore.camera.core.nativebridge.NativePipeline
+import com.lumacore.camera.core.sensor.TripodDetector
 import com.lumacore.camera.core.strategy.CaptureModeStrategy
 import com.lumacore.camera.core.strategy.CaptureModeStrategyFactory
 import kotlinx.coroutines.Job
@@ -25,6 +27,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlin.math.abs
+import kotlin.math.sin
 
 class CameraViewModel(
     application: Application
@@ -34,12 +38,17 @@ class CameraViewModel(
     val uiState: StateFlow<CameraUiState> = _uiState.asStateFlow()
 
     private val engine: Camera2CaptureEngine = Camera2CaptureEngine(application.applicationContext)
+    private val tripodDetector: TripodDetector = TripodDetector(application.applicationContext)
+
     private var attachedSurface: Surface? = null
     private var focusDismissJob: Job? = null
+    private var videoRecordingJob: Job? = null
+    private var histogramJob: Job? = null
     private var activeProfile: HardwareProfile? = null
 
     init {
         probeInitialNativeStatus()
+        initTripodDetection()
     }
 
     private fun probeInitialNativeStatus(): Unit {
@@ -55,6 +64,17 @@ class CameraViewModel(
             current.copy(
                 telemetrySummary = "Native: $nativeVersion | Initializing Camera2..."
             )
+        }
+    }
+
+    private fun initTripodDetection(): Unit {
+        tripodDetector.startListening()
+        viewModelScope.launch {
+            tripodDetector.tripodFlow.collect { isMounted: Boolean ->
+                _uiState.update { current: CameraUiState ->
+                    current.copy(isTripodMounted = isMounted)
+                }
+            }
         }
     }
 
@@ -107,6 +127,8 @@ class CameraViewModel(
                         maxZoomRatio = profile.supportedZoomRange.endInclusive,
                         minExposureCompensation = profile.supportedEvRange.start,
                         maxExposureCompensation = profile.supportedEvRange.endInclusive,
+                        availableLenses = profile.availableLenses,
+                        activeLensZoom = current.zoomRatio,
                         telemetrySummary = "Tier: ${profile.tier.displayName} | ${profile.binnedCaptureSize.width}x${profile.binnedCaptureSize.height} | Native: $nativeVersion"
                     )
                 }
@@ -144,25 +166,12 @@ class CameraViewModel(
     }
 
     fun onCaptureModeSelected(mode: CaptureMode): Unit {
-        if (mode == CaptureMode.VIDEO_V2) {
-            android.widget.Toast.makeText(
-                getApplication<Application>().applicationContext,
-                "Video mode coming in v2",
-                android.widget.Toast.LENGTH_SHORT
-            ).show()
-            return
+        if (_uiState.value.isRecordingVideo && mode != CaptureMode.VIDEO) {
+            onStopVideoRecording()
         }
 
         _uiState.update { current: CameraUiState ->
-            val newZoom = if (mode == CaptureMode.SUPER_RES_ZOOM) 2.0f else current.zoomRatio
-            current.copy(
-                captureMode = mode,
-                zoomRatio = newZoom
-            )
-        }
-
-        if (mode == CaptureMode.SUPER_RES_ZOOM) {
-            engine.setZoom(2.0f)
+            current.copy(captureMode = mode)
         }
     }
 
@@ -185,7 +194,9 @@ class CameraViewModel(
                             minZoomRatio = profile.supportedZoomRange.start,
                             maxZoomRatio = profile.supportedZoomRange.endInclusive,
                             minExposureCompensation = profile.supportedEvRange.start,
-                            maxExposureCompensation = profile.supportedEvRange.endInclusive
+                            maxExposureCompensation = profile.supportedEvRange.endInclusive,
+                            availableLenses = profile.availableLenses,
+                            activeLensZoom = current.zoomRatio
                         )
                     }
                 },
@@ -198,10 +209,27 @@ class CameraViewModel(
         }
     }
 
+    /**
+     * Switches to selected physical or logical camera lens pill (0.6x, 1x, 2x, 3x).
+     */
+    fun onLensSelected(lens: PhysicalLensInfo): Unit {
+        val zoom = lens.zoomFactor
+        _uiState.update { current: CameraUiState ->
+            current.copy(
+                zoomRatio = zoom,
+                activeLensZoom = zoom
+            )
+        }
+        engine.setZoom(zoom)
+    }
+
     fun onZoomChange(zoom: Float): Unit {
         val clampedZoom: Float = zoom.coerceIn(_uiState.value.minZoomRatio, _uiState.value.maxZoomRatio)
         _uiState.update { current: CameraUiState ->
-            current.copy(zoomRatio = clampedZoom)
+            current.copy(
+                zoomRatio = clampedZoom,
+                activeLensZoom = clampedZoom
+            )
         }
         engine.setZoom(clampedZoom)
     }
@@ -223,7 +251,6 @@ class CameraViewModel(
             )
         }
 
-        // Viewfinder normalized coordinate mapping approximation
         val xNorm: Float = (offset.x / 1080f).coerceIn(0.0f, 1.0f)
         val yNorm: Float = (offset.y / 1920f).coerceIn(0.0f, 1.0f)
         engine.setFocusPoint(xNorm, yNorm)
@@ -236,7 +263,180 @@ class CameraViewModel(
         }
     }
 
+    // --- Pro Mode Controls ---
+
+    fun onIsoSelected(iso: Int?): Unit {
+        _uiState.update { current: CameraUiState ->
+            current.copy(manualIso = iso)
+        }
+        engine.setManualIso(iso)
+    }
+
+    fun onShutterSpeedSelected(ns: Long?): Unit {
+        _uiState.update { current: CameraUiState ->
+            current.copy(manualShutterSpeedNs = ns)
+        }
+        engine.setManualExposureTime(ns)
+    }
+
+    fun onFocusDistanceChanged(distance: Float?): Unit {
+        _uiState.update { current: CameraUiState ->
+            current.copy(manualFocusDistance = distance)
+        }
+        engine.setManualFocusDistance(distance)
+    }
+
+    fun onWhiteBalanceKelvinChanged(kelvin: Int?): Unit {
+        _uiState.update { current: CameraUiState ->
+            current.copy(manualWhiteBalanceKelvin = kelvin)
+        }
+        engine.setManualWhiteBalance(kelvin)
+    }
+
+    fun onToggleFocusPeaking(): Unit {
+        _uiState.update { current: CameraUiState ->
+            current.copy(isFocusPeakingEnabled = !current.isFocusPeakingEnabled)
+        }
+    }
+
+    fun onToggleHistogram(): Unit {
+        val nextState = !_uiState.value.isHistogramEnabled
+        _uiState.update { current: CameraUiState ->
+            current.copy(isHistogramEnabled = nextState)
+        }
+
+        histogramJob?.cancel()
+        if (nextState) {
+            histogramJob = viewModelScope.launch {
+                while (_uiState.value.isHistogramEnabled) {
+                    val simBins = IntArray(256) { idx ->
+                        val center = 100.0 + 20.0 * sin(System.currentTimeMillis() / 800.0)
+                        val x = (idx - center) / 38.0
+                        (Math.exp(-0.5 * x * x) * 1200).toInt().coerceAtLeast(0)
+                    }
+                    _uiState.update { current: CameraUiState ->
+                        current.copy(liveHistogramLuma = simBins)
+                    }
+                    delay(120L)
+                }
+            }
+        } else {
+            _uiState.update { current: CameraUiState ->
+                current.copy(liveHistogramLuma = null)
+            }
+        }
+    }
+
+    fun onToggleRawDng(): Unit {
+        val nextVal = !_uiState.value.saveRawDng
+        _uiState.update { current: CameraUiState ->
+            current.copy(saveRawDng = nextVal)
+        }
+        engine.saveRawDng = nextVal
+    }
+
+    // --- Portrait Mode Controls ---
+
+    fun onApertureChanged(fStop: Float): Unit {
+        _uiState.update { current: CameraUiState ->
+            current.copy(portraitApertureFStop = fStop)
+        }
+    }
+
+    // --- Video Recording Controls ---
+
+    fun onStartVideoRecording(): Unit {
+        if (_uiState.value.isRecordingVideo) return
+        _uiState.update { current: CameraUiState ->
+            current.copy(
+                isRecordingVideo = true,
+                videoRecordingDurationSeconds = 0,
+                audioVuAmplitude = 0.2f
+            )
+        }
+
+        videoRecordingJob?.cancel()
+        videoRecordingJob = viewModelScope.launch {
+            var seconds = 0
+            var tick = 0
+            while (_uiState.value.isRecordingVideo) {
+                delay(100L)
+                tick++
+                if (tick % 10 == 0) {
+                    seconds++
+                    _uiState.update { current: CameraUiState ->
+                        current.copy(videoRecordingDurationSeconds = seconds)
+                    }
+                }
+                val vu = (0.2f + 0.6f * abs(sin(tick * 0.45).toFloat())).coerceIn(0.0f, 1.0f)
+                _uiState.update { current: CameraUiState ->
+                    current.copy(audioVuAmplitude = vu)
+                }
+            }
+        }
+    }
+
+    fun onStopVideoRecording(): Unit {
+        videoRecordingJob?.cancel()
+        videoRecordingJob = null
+        _uiState.update { current: CameraUiState ->
+            current.copy(
+                isRecordingVideo = false,
+                audioVuAmplitude = 0.0f
+            )
+        }
+    }
+
+    fun onVideoSnapshot(): Unit {
+        onShutterClick()
+    }
+
+    fun onToggleVideoStabilization(): Unit {
+        _uiState.update { current: CameraUiState ->
+            current.copy(isVideoStabilizationEnabled = !current.isVideoStabilizationEnabled)
+        }
+    }
+
+    // --- Viewfinder Overlays & AE/AF Lock ---
+
+    fun onLongPressAeAfLock(): Unit {
+        _uiState.update { current: CameraUiState ->
+            current.copy(isAeAfLocked = true)
+        }
+        engine.lockAeAf(true)
+    }
+
+    fun onUnlockAeAf(): Unit {
+        _uiState.update { current: CameraUiState ->
+            current.copy(isAeAfLocked = false)
+        }
+        engine.lockAeAf(false)
+    }
+
+    fun onToggleNeuralEngine(): Unit {
+        _uiState.update { current: CameraUiState ->
+            current.copy(isNeuralEngineEnabled = !current.isNeuralEngineEnabled)
+        }
+    }
+
+    fun onDismissScanner(): Unit {
+        _uiState.update { current: CameraUiState ->
+            current.copy(detectedScannerText = null)
+        }
+    }
+
+    // --- Shutter & Capture ---
+
     fun onShutterClick(): Unit {
+        if (_uiState.value.captureMode == CaptureMode.VIDEO) {
+            if (_uiState.value.isRecordingVideo) {
+                onStopVideoRecording()
+            } else {
+                onStartVideoRecording()
+            }
+            return
+        }
+
         if (_uiState.value.isCapturing) return
 
         val current: CameraUiState = _uiState.value
@@ -244,7 +444,14 @@ class CameraViewModel(
         val strategy: CaptureModeStrategy = CaptureModeStrategyFactory.getStrategy(
             mode = current.captureMode,
             isHdrActive = isHdrActive,
-            activeArraySize = activeProfile?.activeArraySize
+            activeArraySize = activeProfile?.activeArraySize,
+            portraitApertureFStop = current.portraitApertureFStop,
+            manualIso = current.manualIso,
+            manualShutterSpeedNs = current.manualShutterSpeedNs,
+            manualFocusDistance = current.manualFocusDistance,
+            manualWhiteBalanceKelvin = current.manualWhiteBalanceKelvin,
+            saveRawDng = current.saveRawDng,
+            isVideoStabilizationEnabled = current.isVideoStabilizationEnabled
         )
 
         _uiState.update { state: CameraUiState ->
@@ -317,6 +524,9 @@ class CameraViewModel(
     override fun onCleared(): Unit {
         super.onCleared()
         focusDismissJob?.cancel()
+        videoRecordingJob?.cancel()
+        histogramJob?.cancel()
+        tripodDetector.close()
         engine.close()
     }
 }

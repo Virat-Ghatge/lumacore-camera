@@ -119,4 +119,14 @@ object NativePipeline {
         radialVignetteGain: Float,
         outRgba: ByteBuffer
     ): Boolean
+
+    external fun nativeComputeHistogram(
+        rgbaBuffer: ByteBuffer,
+        width: Int,
+        height: Int,
+        outR: IntArray,
+        outG: IntArray,
+        outB: IntArray,
+        outLuma: IntArray
+    ): Boolean
 }

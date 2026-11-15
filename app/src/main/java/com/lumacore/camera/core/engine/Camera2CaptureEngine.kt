@@ -16,6 +16,7 @@ import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.params.MeteringRectangle
+import android.hardware.camera2.params.RggbChannelVector
 import android.media.Image
 import android.media.ImageReader
 import android.net.Uri
@@ -150,9 +151,17 @@ class Camera2CaptureEngine(
     private var previewRequestBuilder: CaptureRequest.Builder? = null
 
     private var hardwareProfile: HardwareProfile? = null
+    private var cameraCharacteristics: CameraCharacteristics? = null
     private var currentLensFacing: LensFacing = LensFacing.BACK
     private var currentZoomRatio: Float = 1.0f
     private var currentExposureCompensation: Int = 0
+
+    var saveRawDng: Boolean = false
+    private var isAeAfLocked: Boolean = false
+    private var manualIso: Int? = null
+    private var manualExposureTimeNs: Long? = null
+    private var manualFocusDistance: Float? = null
+    private var manualWhiteBalanceKelvin: Int? = null
 
     /**
      * Probes hardware and initializes Camera2 session for the specified lens facing.
@@ -176,6 +185,7 @@ class Camera2CaptureEngine(
         try {
             val profile = HardwareCapabilityProber.probeCamera(cameraManager, lensFacing)
             this.hardwareProfile = profile
+            this.cameraCharacteristics = cameraManager.getCameraCharacteristics(profile.cameraId)
 
             val captureFormat = if (profile.tier == HardwareTier.TIER_1_RAW_BURST) {
                 ImageFormat.RAW_SENSOR
@@ -266,6 +276,7 @@ class Camera2CaptureEngine(
 
             applyZoom(builder, currentZoomRatio)
             applyExposureCompensation(builder, currentExposureCompensation)
+            applyManualControls(builder)
 
             previewRequestBuilder = builder
             session.setRepeatingRequest(builder.build(), previewCaptureCallback, cameraHandler)
@@ -369,6 +380,118 @@ class Camera2CaptureEngine(
     }
 
     /**
+     * Sets manual ISO sensitivity. Pass null to revert to automatic AE.
+     */
+    fun setManualIso(iso: Int?): Unit {
+        this.manualIso = iso
+        updatePreviewRepeatingRequest()
+    }
+
+    /**
+     * Sets manual exposure time in nanoseconds. Pass null to revert to automatic AE.
+     */
+    fun setManualExposureTime(exposureTimeNs: Long?): Unit {
+        this.manualExposureTimeNs = exposureTimeNs
+        updatePreviewRepeatingRequest()
+    }
+
+    /**
+     * Sets manual focus distance in diopters (0.0f = infinity, larger = closer macro).
+     * Pass null to revert to continuous autofocus.
+     */
+    fun setManualFocusDistance(diopters: Float?): Unit {
+        this.manualFocusDistance = diopters
+        updatePreviewRepeatingRequest()
+    }
+
+    /**
+     * Sets manual white balance color temperature in Kelvin (2000K to 10000K).
+     * Pass null to revert to automatic white balance (AWB).
+     */
+    fun setManualWhiteBalance(kelvin: Int?): Unit {
+        this.manualWhiteBalanceKelvin = kelvin
+        updatePreviewRepeatingRequest()
+    }
+
+    /**
+     * Locks or unlocks Auto Exposure (AE) and Auto Focus (AF).
+     */
+    fun lockAeAf(lock: Boolean): Unit {
+        this.isAeAfLocked = lock
+        val builder = previewRequestBuilder ?: return
+        val session = captureSession ?: return
+        try {
+            builder.set(CaptureRequest.CONTROL_AE_LOCK, lock)
+            if (lock) {
+                builder.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START)
+            } else {
+                builder.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_CANCEL)
+            }
+            session.setRepeatingRequest(builder.build(), previewCaptureCallback, cameraHandler)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to toggle AE/AF lock", e)
+        }
+    }
+
+    private fun updatePreviewRepeatingRequest(): Unit {
+        val builder = previewRequestBuilder ?: return
+        val session = captureSession ?: return
+        try {
+            applyManualControls(builder)
+            session.setRepeatingRequest(builder.build(), previewCaptureCallback, cameraHandler)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to apply manual controls to repeating request", e)
+        }
+    }
+
+    private fun applyManualControls(builder: CaptureRequest.Builder): Unit {
+        // Manual ISO and Exposure Time
+        if (manualIso != null || manualExposureTimeNs != null) {
+            builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+            manualIso?.let { iso ->
+                builder.set(CaptureRequest.SENSOR_SENSITIVITY, iso)
+            }
+            manualExposureTimeNs?.let { expNs ->
+                builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, expNs)
+            }
+        } else {
+            builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+        }
+
+        // Manual Focus Distance
+        if (manualFocusDistance != null) {
+            builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+            builder.set(CaptureRequest.LENS_FOCUS_DISTANCE, manualFocusDistance)
+        } else {
+            builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+        }
+
+        // Manual White Balance (Kelvin)
+        if (manualWhiteBalanceKelvin != null) {
+            builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF)
+            builder.set(CaptureRequest.COLOR_CORRECTION_MODE, CaptureRequest.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX)
+            val kelvin = manualWhiteBalanceKelvin!!.toFloat()
+            // Planckian locus approximation for Kelvin -> R & B channel gains
+            val rGain: Float = if (kelvin <= 5500f) {
+                1.0f + ((kelvin - 2000f) / 3500f) * 0.8f
+            } else {
+                1.8f + ((kelvin - 5500f) / 4500f) * 1.2f
+            }.coerceIn(0.5f, 4.0f)
+
+            val bGain: Float = if (kelvin <= 5500f) {
+                3.0f - ((kelvin - 2000f) / 3500f) * 1.5f
+            } else {
+                1.5f - ((kelvin - 5500f) / 4500f) * 0.7f
+            }.coerceIn(0.5f, 4.0f)
+
+            val gains = RggbChannelVector(rGain, 1.0f, 1.0f, bGain)
+            builder.set(CaptureRequest.COLOR_CORRECTION_GAINS, gains)
+        } else {
+            builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+        }
+    }
+
+    /**
      * Executes atomic burst capture sequence according to strategy rules,
      * immediately reaps frame planes and releases the shutter lock,
      * and asynchronously dispatches alignment, color science, and neural enhancement
@@ -416,6 +539,7 @@ class Camera2CaptureEngine(
                 strategy.configureCapture(builder, profile.tier, i, totalFrames)
                 applyZoom(builder, currentZoomRatio)
                 applyExposureCompensation(builder, currentExposureCompensation)
+                applyManualControls(builder)
 
                 if (isLowLight) {
                     // Shutter Ceiling: Clamp shutter duration <= 33ms (1/30s) to prevent handshake blur
@@ -576,6 +700,26 @@ class Camera2CaptureEngine(
                 gyroRotations[baseIdx + 2] = rot[2]
             }
             gyroSampler.stopSampling()
+
+            // Save RAW DNG alongside JPEG if requested and format is RAW_SENSOR
+            if (saveRawDng && frames.isNotEmpty() && frames[0].format == ImageFormat.RAW_SENSOR) {
+                val chars = cameraCharacteristics
+                val result = latestPreviewResult
+                val orientation = hardwareProfile?.sensorOrientation ?: 90
+                if (chars != null && result != null) {
+                    try {
+                        MediaSaver.saveDng(
+                            context = context,
+                            characteristics = chars,
+                            captureResult = result,
+                            rawImage = frames[0],
+                            orientationDegrees = orientation
+                        )
+                    } catch (dngEx: Exception) {
+                        Log.e(TAG, "Error saving RAW DNG alongside JPEG to MediaStore", dngEx)
+                    }
+                }
+            }
 
             // 1. Decouple from ImageReader by copying planes into direct memory carriers & closing frames
             val carriers = reapPlanesAndCloseImages(frames)
@@ -821,7 +965,7 @@ class Camera2CaptureEngine(
         var mergeMs = 0.0f
         var ghostRatio = 0.0f
 
-        if (strategy.mode == com.lumacore.camera.core.model.CaptureMode.SUPER_RES_ZOOM || currentZoomRatio >= 1.9f) {
+        if (currentZoomRatio >= 1.9f) {
             // 2x Super-Resolution sub-pixel burst merge
             val cropW = (width / 2) and 1.inv()
             val cropH = (height / 2) and 1.inv()

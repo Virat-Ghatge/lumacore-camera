@@ -184,14 +184,14 @@ class ActionAntiBlurModeStrategy(
 }
 
 /**
- * Super-resolution multi-frame zoom strategy (4-6 frames burst with center crop sampling).
+ * Portrait capture strategy simulating shallow depth-of-field with adjustable synthetic bokeh aperture.
  */
-class SuperResZoomModeStrategy(
-    override val burstCount: Int = 6,
-    private val activeArraySize: android.graphics.Rect? = null
+class PortraitModeStrategy(
+    val apertureFStop: Float = 2.8f
 ) : CaptureModeStrategy {
 
-    override val mode: CaptureMode = CaptureMode.SUPER_RES_ZOOM
+    override val mode: CaptureMode = CaptureMode.PORTRAIT
+    override val burstCount: Int = 1
 
     override fun getTargetFormat(tier: HardwareTier): Int = when (tier) {
         HardwareTier.TIER_1_RAW_BURST -> ImageFormat.RAW_SENSOR
@@ -203,6 +203,10 @@ class SuperResZoomModeStrategy(
         builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
         builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
         builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+        // Enable face detection priority for portrait depth estimation
+        try {
+            builder.set(CaptureRequest.STATISTICS_FACE_DETECT_MODE, CaptureRequest.STATISTICS_FACE_DETECT_MODE_SIMPLE)
+        } catch (_: Exception) {}
     }
 
     override fun configureCapture(
@@ -212,30 +216,103 @@ class SuperResZoomModeStrategy(
         totalFrames: Int
     ): Unit {
         configureRepeating(builder, tier)
-
         if (tier == HardwareTier.TIER_2_YUV_FAST) {
             builder.set(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_OFF)
             builder.set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_FAST)
-        }
-
-        // Configure 2x center crop region if active array size is available
-        if (activeArraySize != null) {
-            val cropW = activeArraySize.width() / 2
-            val cropH = activeArraySize.height() / 2
-            val cropLeft = (activeArraySize.width() - cropW) / 2
-            val cropTop = (activeArraySize.height() - cropH) / 2
-            val cropRect = android.graphics.Rect(cropLeft, cropTop, cropLeft + cropW, cropTop + cropH)
-            builder.set(CaptureRequest.SCALER_CROP_REGION, cropRect)
         }
     }
 }
 
 /**
- * Placeholder strategy stubbing future video recording without breaking capture session.
+ * Professional manual capture strategy allowing explicit ISO, shutter speed,
+ * manual focus distance, Kelvin white balance, and optional RAW DNG capture.
  */
-class VideoModePlaceholderStrategy : CaptureModeStrategy {
+class ProManualModeStrategy(
+    val iso: Int? = null,
+    val shutterSpeedNs: Long? = null,
+    val focusDistance: Float? = null,
+    val whiteBalanceKelvin: Int? = null,
+    val saveRawDng: Boolean = false
+) : CaptureModeStrategy {
 
-    override val mode: CaptureMode = CaptureMode.VIDEO_V2
+    override val mode: CaptureMode = CaptureMode.PRO
+    override val burstCount: Int = 1
+
+    override fun getTargetFormat(tier: HardwareTier): Int = if (saveRawDng) {
+        ImageFormat.RAW_SENSOR
+    } else {
+        when (tier) {
+            HardwareTier.TIER_1_RAW_BURST -> ImageFormat.RAW_SENSOR
+            HardwareTier.TIER_2_YUV_FAST, HardwareTier.LEGACY -> ImageFormat.YUV_420_888
+        }
+    }
+
+    override fun configureRepeating(builder: CaptureRequest.Builder, tier: HardwareTier): Unit {
+        builder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
+
+        // Manual or Auto AE
+        if (iso != null || shutterSpeedNs != null) {
+            builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+            iso?.let { builder.set(CaptureRequest.SENSOR_SENSITIVITY, it) }
+            shutterSpeedNs?.let { builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, it) }
+        } else {
+            builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+        }
+
+        // Manual or Auto Focus
+        if (focusDistance != null) {
+            builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+            builder.set(CaptureRequest.LENS_FOCUS_DISTANCE, focusDistance)
+        } else {
+            builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+        }
+
+        // Manual or Auto White Balance
+        if (whiteBalanceKelvin != null) {
+            builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF)
+            builder.set(CaptureRequest.COLOR_CORRECTION_MODE, CaptureRequest.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX)
+            val kelvin = whiteBalanceKelvin.toFloat()
+            val rGain: Float = if (kelvin <= 5500f) {
+                1.0f + ((kelvin - 2000f) / 3500f) * 0.8f
+            } else {
+                1.8f + ((kelvin - 5500f) / 4500f) * 1.2f
+            }.coerceIn(0.5f, 4.0f)
+
+            val bGain: Float = if (kelvin <= 5500f) {
+                3.0f - ((kelvin - 2000f) / 3500f) * 1.5f
+            } else {
+                1.5f - ((kelvin - 5500f) / 4500f) * 0.7f
+            }.coerceIn(0.5f, 4.0f)
+
+            val gains = android.hardware.camera2.params.RggbChannelVector(rGain, 1.0f, 1.0f, bGain)
+            builder.set(CaptureRequest.COLOR_CORRECTION_GAINS, gains)
+        } else {
+            builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+        }
+    }
+
+    override fun configureCapture(
+        builder: CaptureRequest.Builder,
+        tier: HardwareTier,
+        frameIndex: Int,
+        totalFrames: Int
+    ): Unit {
+        configureRepeating(builder, tier)
+        if (tier == HardwareTier.TIER_2_YUV_FAST) {
+            builder.set(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_OFF)
+            builder.set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_FAST)
+        }
+    }
+}
+
+/**
+ * Video recording strategy with continuous video autofocus and optional electronic video stabilization.
+ */
+class VideoModeStrategy(
+    val isStabilizationEnabled: Boolean = true
+) : CaptureModeStrategy {
+
+    override val mode: CaptureMode = CaptureMode.VIDEO
     override val burstCount: Int = 1
 
     override fun getTargetFormat(tier: HardwareTier): Int = ImageFormat.YUV_420_888
@@ -245,6 +322,17 @@ class VideoModePlaceholderStrategy : CaptureModeStrategy {
         builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
         builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
         builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+        if (isStabilizationEnabled) {
+            builder.set(
+                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+            )
+        } else {
+            builder.set(
+                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF
+            )
+        }
     }
 
     override fun configureCapture(
@@ -254,23 +342,5 @@ class VideoModePlaceholderStrategy : CaptureModeStrategy {
         totalFrames: Int
     ): Unit {
         configureRepeating(builder, tier)
-    }
-}
-
-/**
- * Factory providing corresponding [CaptureModeStrategy] implementation.
- */
-object CaptureModeStrategyFactory {
-
-    fun getStrategy(
-        mode: CaptureMode,
-        isHdrActive: Boolean = false,
-        activeArraySize: android.graphics.Rect? = null
-    ): CaptureModeStrategy = when (mode) {
-        CaptureMode.PHOTO -> PhotoStandardModeStrategy(isHdrActive = isHdrActive)
-        CaptureMode.NIGHT -> NightBurstModeStrategy()
-        CaptureMode.ACTION -> ActionAntiBlurModeStrategy()
-        CaptureMode.SUPER_RES_ZOOM -> SuperResZoomModeStrategy(activeArraySize = activeArraySize)
-        CaptureMode.VIDEO_V2 -> VideoModePlaceholderStrategy()
     }
 }

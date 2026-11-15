@@ -17,6 +17,7 @@ add_library(
     lumacore_sharpness.cpp
     lumacore_super_res.cpp
     lumacore_color_pipeline.cpp
+    lumacore_histogram.cpp
 )
 
 find_library(log-lib log)
@@ -41,6 +42,7 @@ add_executable(
     lumacore_sharpness.cpp
     lumacore_super_res.cpp
     lumacore_color_pipeline.cpp
+    lumacore_histogram.cpp
 )
 
 target_link_libraries(

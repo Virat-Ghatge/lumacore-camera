@@ -10,11 +10,16 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.CameraAlt
 import androidx.compose.material.icons.rounded.GridOn
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Memory
+import androidx.compose.material.icons.rounded.MotionPhotosOn
+import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -51,9 +56,13 @@ fun SettingsBottomSheet(
     onDismissRequest: () -> Unit,
     onToggleGrid: (Boolean) -> Unit,
     onToggleTelemetry: (Boolean) -> Unit,
+    onToggleNeuralEngine: () -> Unit,
+    onToggleRawDng: () -> Unit,
+    onToggleVideoStabilization: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val scrollState = rememberScrollState()
 
     ModalBottomSheet(
         onDismissRequest = onDismissRequest,
@@ -65,8 +74,9 @@ fun SettingsBottomSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .verticalScroll(scrollState)
                 .padding(horizontal = 20.dp)
-                .padding(bottom = 32.dp)
+                .padding(bottom = 36.dp)
         ) {
             // Header
             Text(
@@ -85,7 +95,40 @@ fun SettingsBottomSheet(
             HorizontalDivider(color = Color(0x22FFFFFF))
             Spacer(modifier = Modifier.height(16.dp))
 
-            // 2. Framing Grid Switch
+            // 2. Neural Engine Toggle (LumaCore Neural vs Stock ISP)
+            SettingsSwitchRow(
+                icon = Icons.Rounded.Psychology,
+                title = "LumaCore Neural Engine",
+                subtitle = "ONNX Runtime bilateral grid neural enhancement vs stock ISP",
+                checked = uiState.isNeuralEngineEnabled,
+                onCheckedChange = { onToggleNeuralEngine() }
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // 3. RAW DNG Toggle
+            SettingsSwitchRow(
+                icon = Icons.Rounded.CameraAlt,
+                title = "RAW DNG Capture",
+                subtitle = "Save uncompressed 16-bit linear sensor DNG alongside JPEG",
+                checked = uiState.saveRawDng,
+                onCheckedChange = { onToggleRawDng() }
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // 4. Video Stabilization Toggle (EIS)
+            SettingsSwitchRow(
+                icon = Icons.Rounded.MotionPhotosOn,
+                title = "Video Stabilization (EIS)",
+                subtitle = "Electronic gyro-assisted video smoothing during recording",
+                checked = uiState.isVideoStabilizationEnabled,
+                onCheckedChange = { onToggleVideoStabilization() }
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // 5. Framing Grid Switch
             SettingsSwitchRow(
                 icon = Icons.Rounded.GridOn,
                 title = "Rule of Thirds Grid",
@@ -96,7 +139,7 @@ fun SettingsBottomSheet(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // 3. Telemetry Overlay Switch
+            // 6. Telemetry Overlay Switch
             SettingsSwitchRow(
                 icon = Icons.Rounded.Speed,
                 title = "Real-time Telemetry HUD",
@@ -109,12 +152,12 @@ fun SettingsBottomSheet(
             HorizontalDivider(color = Color(0x22FFFFFF))
             Spacer(modifier = Modifier.height(16.dp))
 
-            // 4. Mode Capabilities Breakdown
+            // 7. Mode Capabilities Breakdown
             ModeCapabilitiesCard()
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // 5. About Neural Engine
+            // 8. About Neural Engine
             AboutNeuralEngineCard()
         }
     }
@@ -200,7 +243,7 @@ private fun ModeCapabilitiesCard() {
                 modifier = Modifier.size(18.dp)
             )
             Text(
-                text = "Specialized Mode Capabilities",
+                text = "Stock Camera Feature Suite",
                 color = White,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Bold
@@ -216,8 +259,20 @@ private fun ModeCapabilitiesCard() {
         Spacer(modifier = Modifier.height(8.dp))
         ModeCapabilityRow(
             name = "NIGHT",
-            spec = "8 frames burst",
-            desc = "Exposure bracketing (-1.5 EV to +1.5 EV) & deep shadow lifting"
+            spec = "8 frames burst + Tripod",
+            desc = "Exposure bracketing (-2 to 0 EV), deep shadow lifting & gyro/tripod detection"
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        ModeCapabilityRow(
+            name = "PORTRAIT",
+            spec = "Synthetic Bokeh (f/1.4 - f/16)",
+            desc = "Face priority detection and adjustable aperture depth rendering"
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        ModeCapabilityRow(
+            name = "PRO",
+            spec = "Manual Controls + RAW DNG",
+            desc = "Granular ISO, shutter speed, manual focus, Kelvin WB, focus peaking & live histogram"
         )
         Spacer(modifier = Modifier.height(8.dp))
         ModeCapabilityRow(
@@ -227,9 +282,9 @@ private fun ModeCapabilitiesCard() {
         )
         Spacer(modifier = Modifier.height(8.dp))
         ModeCapabilityRow(
-            name = "ZOOM+ (2x)",
-            spec = "6 frames super-res",
-            desc = "Sub-pixel micro-displacement estimation & bilateral Lanczos splatting"
+            name = "VIDEO",
+            spec = "1080p/4K + EIS + VU Meter",
+            desc = "Continuous video AF, electronic stabilization, live audio VU meter & still snapshot"
         )
     }
 }

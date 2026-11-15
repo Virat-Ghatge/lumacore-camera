@@ -16,6 +16,17 @@ import com.lumacore.camera.core.model.LensFacing
 import kotlin.math.abs
 
 /**
+ * Encapsulates physical or logical camera lens characteristics for multi-camera switching.
+ */
+data class PhysicalLensInfo(
+    val cameraId: String,
+    val label: String,
+    val focalLength: Float,
+    val zoomFactor: Float,
+    val isFront: Boolean
+)
+
+/**
  * Encapsulates probed camera hardware capabilities and optimal pipeline parameters.
  */
 data class HardwareProfile(
@@ -28,7 +39,8 @@ data class HardwareProfile(
     val supportedZoomRange: ClosedFloatingPointRange<Float>,
     val rawSensorSize: Size? = null,
     val activeArraySize: Rect? = null,
-    val sensorOrientation: Int = 90
+    val sensorOrientation: Int = 90,
+    val availableLenses: List<PhysicalLensInfo> = emptyList()
 )
 
 /**
@@ -79,7 +91,8 @@ object HardwareCapabilityProber {
         val characteristics: CameraCharacteristics = matchedCharacteristics
             ?: cameraManager.getCameraCharacteristics(cameraId)
 
-        return buildProfile(cameraId = cameraId, characteristics = characteristics)
+        val lenses = probeAvailableLenses(cameraManager, preferredFacing)
+        return buildProfile(cameraId = cameraId, characteristics = characteristics, availableLenses = lenses)
     }
 
     /**
@@ -98,7 +111,8 @@ object HardwareCapabilityProber {
                     else -> LensFacing.BACK
                 }
                 if (!resultMap.containsKey(lensFacing)) {
-                    resultMap[lensFacing] = buildProfile(cameraId = id, characteristics = chars)
+                    val lenses = probeAvailableLenses(cameraManager, lensFacing)
+                    resultMap[lensFacing] = buildProfile(cameraId = id, characteristics = chars, availableLenses = lenses)
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Error probing camera id $id", e)
@@ -212,9 +226,158 @@ object HardwareCapabilityProber {
         return bestPreviewSize
     }
 
+    /**
+     * Probes all physical and logical lenses available on the device for the given lens direction.
+     * Detects 0.6x (Ultrawide, focal < 3mm), 1x (Wide, focal ~4-6mm), 2x (crop/telephoto), and 3x (telephoto >= 9mm).
+     */
+    fun probeAvailableLenses(
+        cameraManager: CameraManager,
+        preferredFacing: LensFacing
+    ): List<PhysicalLensInfo> {
+        val targetFacingConstant: Int = when (preferredFacing) {
+            LensFacing.BACK -> CameraCharacteristics.LENS_FACING_BACK
+            LensFacing.FRONT -> CameraCharacteristics.LENS_FACING_FRONT
+        }
+        val isFront = preferredFacing == LensFacing.FRONT
+
+        var ultrawideLens: PhysicalLensInfo? = null
+        var wideLens: PhysicalLensInfo? = null
+        var telephoto2xLens: PhysicalLensInfo? = null
+        var telephoto3xLens: PhysicalLensInfo? = null
+
+        val cameraIds = cameraManager.cameraIdList
+        var primaryCameraId = "0"
+
+        for (id in cameraIds) {
+            try {
+                val chars = cameraManager.getCameraCharacteristics(id)
+                val facing = chars.get(CameraCharacteristics.LENS_FACING) ?: continue
+                if (facing != targetFacingConstant) continue
+
+                if (wideLens == null) {
+                    primaryCameraId = id
+                }
+
+                // Check physical camera IDs if logical multi-camera on API 28+
+                val physicalIds = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    chars.physicalCameraIds
+                } else {
+                    emptySet()
+                }
+
+                val allIdsToCheck = mutableListOf(id)
+                allIdsToCheck.addAll(physicalIds)
+
+                for (targetId in allIdsToCheck) {
+                    val targetChars = try {
+                        cameraManager.getCameraCharacteristics(targetId)
+                    } catch (_: Exception) {
+                        chars
+                    }
+                    val focals = targetChars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                        ?: floatArrayOf(4.5f)
+
+                    for (focal in focals) {
+                        when {
+                            focal < 3.0f -> {
+                                if (ultrawideLens == null) {
+                                    ultrawideLens = PhysicalLensInfo(
+                                        cameraId = targetId,
+                                        label = "0.6x",
+                                        focalLength = focal,
+                                        zoomFactor = 0.6f,
+                                        isFront = isFront
+                                    )
+                                }
+                            }
+                            focal in 3.0f..6.5f -> {
+                                if (wideLens == null) {
+                                    wideLens = PhysicalLensInfo(
+                                        cameraId = targetId,
+                                        label = "1x",
+                                        focalLength = focal,
+                                        zoomFactor = 1.0f,
+                                        isFront = isFront
+                                    )
+                                }
+                            }
+                            focal > 6.5f && focal < 9.5f -> {
+                                if (telephoto2xLens == null) {
+                                    telephoto2xLens = PhysicalLensInfo(
+                                        cameraId = targetId,
+                                        label = "2x",
+                                        focalLength = focal,
+                                        zoomFactor = 2.0f,
+                                        isFront = isFront
+                                    )
+                                }
+                            }
+                            focal >= 9.5f -> {
+                                if (telephoto3xLens == null) {
+                                    telephoto3xLens = PhysicalLensInfo(
+                                        cameraId = targetId,
+                                        label = "3x",
+                                        focalLength = focal,
+                                        zoomFactor = 3.0f,
+                                        isFront = isFront
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Error inspecting lenses for camera $id", e)
+            }
+        }
+
+        // Guarantee canonical lens suite (0.6x, 1x, 2x, 3x) for UI lens switching
+        val baseWide = wideLens ?: PhysicalLensInfo(
+            cameraId = primaryCameraId,
+            label = "1x",
+            focalLength = 4.5f,
+            zoomFactor = 1.0f,
+            isFront = isFront
+        )
+
+        val baseUltra = ultrawideLens ?: PhysicalLensInfo(
+            cameraId = primaryCameraId,
+            label = "0.6x",
+            focalLength = 2.2f,
+            zoomFactor = 0.6f,
+            isFront = isFront
+        )
+
+        val base2x = telephoto2xLens ?: PhysicalLensInfo(
+            cameraId = primaryCameraId,
+            label = "2x",
+            focalLength = baseWide.focalLength * 2.0f,
+            zoomFactor = 2.0f,
+            isFront = isFront
+        )
+
+        val lenses = mutableListOf(baseUltra, baseWide, base2x)
+        if (telephoto3xLens != null) {
+            lenses.add(telephoto3xLens)
+        } else if (!isFront) {
+            lenses.add(
+                PhysicalLensInfo(
+                    cameraId = primaryCameraId,
+                    label = "3x",
+                    focalLength = baseWide.focalLength * 3.0f,
+                    zoomFactor = 3.0f,
+                    isFront = false
+                )
+            )
+        }
+
+        return lenses
+    }
+
     private fun buildProfile(
         cameraId: String,
-        characteristics: CameraCharacteristics
+        characteristics: CameraCharacteristics,
+        availableLenses: List<PhysicalLensInfo> = emptyList()
     ): HardwareProfile {
         val tier = determineTier(characteristics)
         val streamMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
@@ -266,7 +429,8 @@ object HardwareCapabilityProber {
             supportedZoomRange = supportedZoomRange,
             rawSensorSize = rawSensorSize,
             activeArraySize = activeArray,
-            sensorOrientation = orientation
+            sensorOrientation = orientation,
+            availableLenses = availableLenses
         )
     }
 }
