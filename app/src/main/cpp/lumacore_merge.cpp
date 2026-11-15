@@ -69,12 +69,7 @@ MergeStats mergeBurstFrames(
 
     const auto startTime = std::chrono::steady_clock::now();
 
-    const size_t totalPixels = static_cast<size_t>(width) * static_cast<size_t>(height);
     const size_t numTargets = targetFrames.size();
-
-    // Intermediate weight cache for UV plane averaging
-    // targetWeights[frameIndex][pixelIndex]
-    std::vector<std::vector<float>> targetWeights(numTargets, std::vector<float>(totalPixels, 0.0f));
 
     uint64_t candidatePixels = 0;
     uint64_t ghostRejected = 0;
@@ -95,8 +90,6 @@ MergeStats mergeBurstFrames(
             const float fourSigma = 4.0f * sigma;
             const float threeSigmaInv = 1.0f / (3.0f * sigma);
 
-            const size_t pixelIdx = static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x);
-
             for (size_t k = 0; k < numTargets; ++k) {
                 const auto& tgt = targetFrames[k];
                 float tx = static_cast<float>(x);
@@ -114,7 +107,6 @@ MergeStats mergeBurstFrames(
                 );
 
                 if (warpedVal < 0.0f) {
-                    targetWeights[k][pixelIdx] = 0.0f;
                     continue;
                 }
 
@@ -124,11 +116,9 @@ MergeStats mergeBurstFrames(
                 if (delta > fourSigma) {
                     // Ghost rejection: motion delta exceeds 4 sigma
                     ghostRejected++;
-                    targetWeights[k][pixelIdx] = 0.0f;
                 } else {
                     const float normDiff = delta * threeSigmaInv;
                     const float weight = std::exp(-0.5f * normDiff * normDiff);
-                    targetWeights[k][pixelIdx] = weight;
                     accY += weight * warpedVal;
                     totalWeightY += weight;
                 }
@@ -140,6 +130,7 @@ MergeStats mergeBurstFrames(
     }
 
     // --- Phase 2: Merge UV Planes (Chroma) ---
+    // Zero-heap on-the-fly weighting: computes ghost rejection weight at 2x2 quad center directly
     if (refFrame.uData != nullptr && refFrame.vData != nullptr &&
         outU != nullptr && outV != nullptr) {
 
@@ -148,11 +139,11 @@ MergeStats mergeBurstFrames(
 
         for (int32_t cy = 0; cy < uvHeight; ++cy) {
             const int32_t ry0 = cy * 2;
-            const int32_t ry1 = std::min(ry0 + 1, height - 1);
+            const float refCenterY = static_cast<float>(ry0) + 0.5f;
 
             for (int32_t cx = 0; cx < uvWidth; ++cx) {
                 const int32_t rx0 = cx * 2;
-                const int32_t rx1 = std::min(rx0 + 1, width - 1);
+                const float refCenterX = static_cast<float>(rx0) + 0.5f;
 
                 const size_t refUOffset = static_cast<size_t>(cy) * static_cast<size_t>(refFrame.uvRowStride) +
                                           static_cast<size_t>(cx) * static_cast<size_t>(refFrame.uvPixelStride);
@@ -166,57 +157,88 @@ MergeStats mergeBurstFrames(
                 float accV = refVVal * 1.0f;
                 float totalWeightUV = 1.0f;
 
-                const size_t idx00 = static_cast<size_t>(ry0) * static_cast<size_t>(width) + static_cast<size_t>(rx0);
-                const size_t idx10 = static_cast<size_t>(ry0) * static_cast<size_t>(width) + static_cast<size_t>(rx1);
-                const size_t idx01 = static_cast<size_t>(ry1) * static_cast<size_t>(width) + static_cast<size_t>(rx0);
-                const size_t idx11 = static_cast<size_t>(ry1) * static_cast<size_t>(width) + static_cast<size_t>(rx1);
+                // Bilinear sample reference luma at center of the 2x2 quad
+                const float refLuma = sampleBilinear(
+                    refFrame.yData,
+                    width,
+                    height,
+                    refFrame.yRowStride,
+                    1,
+                    refCenterX,
+                    refCenterY
+                );
 
-                for (size_t k = 0; k < numTargets; ++k) {
-                    const auto& tgt = targetFrames[k];
-                    // Average the 2x2 luma block weights for chroma
-                    const float wAvg = 0.25f * (
-                        targetWeights[k][idx00] +
-                        targetWeights[k][idx10] +
-                        targetWeights[k][idx01] +
-                        targetWeights[k][idx11]
-                    );
+                if (refLuma >= 0.0f) {
+                    const float sigmaSq = std::max(1.0f, noiseGainA * refLuma + noiseFloorB);
+                    const float sigma = std::sqrt(sigmaSq);
+                    const float fourSigma = 4.0f * sigma;
+                    const float threeSigmaInv = 1.0f / (3.0f * sigma);
 
-                    if (wAvg < 1e-4f) {
-                        continue;
-                    }
+                    for (size_t k = 0; k < numTargets; ++k) {
+                        const auto& tgt = targetFrames[k];
 
-                    // Warp center of 2x2 quad
-                    float tpx = static_cast<float>(rx0) + 0.5f;
-                    float tpy = static_cast<float>(ry0) + 0.5f;
-                    tgt.homography.transform(tpx, tpy, &tpx, &tpy);
+                        // Warp quad center into target frame coordinates
+                        float tpx = refCenterX;
+                        float tpy = refCenterY;
+                        tgt.homography.transform(refCenterX, refCenterY, &tpx, &tpy);
 
-                    const float tcx = tpx * 0.5f;
-                    const float tcy = tpy * 0.5f;
+                        // Sample warped target luma at quad center
+                        const float warpedLuma = sampleBilinear(
+                            tgt.planes.yData,
+                            width,
+                            height,
+                            tgt.planes.yRowStride,
+                            1,
+                            tpx,
+                            tpy
+                        );
 
-                    const float warpedU = sampleBilinear(
-                        tgt.planes.uData,
-                        uvWidth,
-                        uvHeight,
-                        tgt.planes.uvRowStride,
-                        tgt.planes.uvPixelStride,
-                        tcx,
-                        tcy
-                    );
+                        if (warpedLuma < 0.0f) {
+                            continue;
+                        }
 
-                    const float warpedV = sampleBilinear(
-                        tgt.planes.vData,
-                        uvWidth,
-                        uvHeight,
-                        tgt.planes.uvRowStride,
-                        tgt.planes.uvPixelStride,
-                        tcx,
-                        tcy
-                    );
+                        const float delta = std::abs(warpedLuma - refLuma);
+                        if (delta > fourSigma) {
+                            // Ghost rejection: motion delta exceeds 4 sigma
+                            continue;
+                        }
 
-                    if (warpedU >= 0.0f && warpedV >= 0.0f) {
-                        accU += wAvg * warpedU;
-                        accV += wAvg * warpedV;
-                        totalWeightUV += wAvg;
+                        const float normDiff = delta * threeSigmaInv;
+                        const float weight = std::exp(-0.5f * normDiff * normDiff);
+
+                        if (weight < 1e-4f) {
+                            continue;
+                        }
+
+                        // Chroma coordinates in target frame (downsampled by 2)
+                        const float tcx = tpx * 0.5f;
+                        const float tcy = tpy * 0.5f;
+
+                        const float warpedU = sampleBilinear(
+                            tgt.planes.uData,
+                            uvWidth,
+                            uvHeight,
+                            tgt.planes.uvRowStride,
+                            tgt.planes.uvPixelStride,
+                            tcx,
+                            tcy
+                        );
+
+                        const float warpedV = sampleBilinear(
+                            tgt.planes.vData,
+                            uvWidth,
+                            uvHeight,
+                            tgt.planes.uvRowStride,
+                            tgt.planes.uvPixelStride,
+                            tcx,
+                            tcy
+                        );
+
+                        if (warpedU >= 0.0f && warpedV >= 0.0f) {
+                            accU += weight * warpedU;
+                            accV += weight * warpedV;
+                            totalWeightUV += weight;
+                        }
                     }
                 }
 

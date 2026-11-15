@@ -68,5 +68,10 @@ data class CameraUiState(
     val isAeAfLocked: Boolean = false,
     val detectedScannerText: String? = null,
     val isNeuralEngineEnabled: Boolean = true,
-    val isTripodMounted: Boolean = false
+    val isTripodMounted: Boolean = false,
+
+    // In-app filmstrip gallery & split-screen comparison
+    val isGalleryOpen: Boolean = false,
+    val galleryUris: List<Uri> = emptyList(),
+    val selectedGalleryIndex: Int = 0
 )

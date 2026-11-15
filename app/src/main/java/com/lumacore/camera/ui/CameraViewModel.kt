@@ -1,7 +1,9 @@
 package com.lumacore.camera.ui
 
 import android.app.Application
+import android.content.ContentUris
 import android.net.Uri
+import android.provider.MediaStore
 import android.view.Surface
 import androidx.compose.ui.geometry.Offset
 import androidx.lifecycle.AndroidViewModel
@@ -20,6 +22,7 @@ import com.lumacore.camera.core.nativebridge.NativePipeline
 import com.lumacore.camera.core.sensor.TripodDetector
 import com.lumacore.camera.core.strategy.CaptureModeStrategy
 import com.lumacore.camera.core.strategy.CaptureModeStrategyFactory
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -27,6 +30,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.sin
 
@@ -518,6 +522,124 @@ class CameraViewModel(
     fun onSettingsDismiss(): Unit {
         _uiState.update { current: CameraUiState ->
             current.copy(isSettingsOpen = false)
+        }
+    }
+
+    // --- In-App Filmstrip Gallery Controls ---
+
+    fun onOpenGallery(): Unit {
+        viewModelScope.launch(Dispatchers.IO) {
+            val queriedUris = queryRecentGalleryUris()
+            withContext(Dispatchers.Main) {
+                _uiState.update { current: CameraUiState ->
+                    val combinedUris = queriedUris.toMutableList()
+                    val lastThumbnail = current.lastCapturedThumbnailUri
+                    if (lastThumbnail != null && !combinedUris.contains(lastThumbnail)) {
+                        combinedUris.add(0, lastThumbnail)
+                    }
+                    current.copy(
+                        isGalleryOpen = true,
+                        galleryUris = combinedUris,
+                        selectedGalleryIndex = 0
+                    )
+                }
+            }
+        }
+    }
+
+    private fun queryRecentGalleryUris(): List<Uri> {
+        val uris = mutableListOf<Uri>()
+        val projection = arrayOf(
+            MediaStore.Images.Media._ID,
+            MediaStore.Images.Media.DATE_ADDED
+        )
+        val selection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
+        val selectionArgs = arrayOf("%DCIM/LumaCore%")
+        val sortOrder = "${MediaStore.Images.Media.DATE_ADDED} DESC"
+
+        try {
+            getApplication<Application>().contentResolver.query(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                projection,
+                selection,
+                selectionArgs,
+                sortOrder
+            )?.use { cursor ->
+                val idCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+                while (cursor.moveToNext() && uris.size < 60) {
+                    val id = cursor.getLong(idCol)
+                    val contentUri = ContentUris.withAppendedId(
+                        MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                        id
+                    )
+                    uris.add(contentUri)
+                }
+            }
+        } catch (_: Exception) {
+            try {
+                getApplication<Application>().contentResolver.query(
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                    projection,
+                    null,
+                    null,
+                    sortOrder
+                )?.use { fallbackCursor ->
+                    val idCol = fallbackCursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+                    while (fallbackCursor.moveToNext() && uris.size < 60) {
+                        val id = fallbackCursor.getLong(idCol)
+                        val contentUri = ContentUris.withAppendedId(
+                            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                            id
+                        )
+                        uris.add(contentUri)
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+        return uris
+    }
+
+    fun onCloseGallery(): Unit {
+        _uiState.update { current: CameraUiState ->
+            current.copy(isGalleryOpen = false)
+        }
+    }
+
+    fun onSelectGalleryPhoto(index: Int): Unit {
+        _uiState.update { current: CameraUiState ->
+            val count = current.galleryUris.size
+            val validIndex = if (count > 0) index.coerceIn(0, count - 1) else 0
+            current.copy(selectedGalleryIndex = validIndex)
+        }
+    }
+
+    fun onDeleteCurrentGalleryPhoto(): Unit {
+        val currentUris = _uiState.value.galleryUris
+        val currentIndex = _uiState.value.selectedGalleryIndex
+        if (currentUris.isEmpty() || currentIndex !in currentUris.indices) return
+
+        val targetUri = currentUris[currentIndex]
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                getApplication<Application>().contentResolver.delete(targetUri, null, null)
+            } catch (_: Exception) {}
+
+            withContext(Dispatchers.Main) {
+                _uiState.update { current: CameraUiState ->
+                    val updatedList = current.galleryUris.toMutableList().apply {
+                        removeAt(currentIndex)
+                    }
+                    val newIndex = if (updatedList.isEmpty()) 0 else currentIndex.coerceAtMost(updatedList.size - 1)
+                    val nextThumbnail = updatedList.firstOrNull()
+                    current.copy(
+                        galleryUris = updatedList,
+                        selectedGalleryIndex = newIndex,
+                        isGalleryOpen = updatedList.isNotEmpty(),
+                        lastCapturedThumbnailUri = if (current.lastCapturedThumbnailUri == targetUri) nextThumbnail else current.lastCapturedThumbnailUri
+                    )
+                }
+            }
         }
     }
 

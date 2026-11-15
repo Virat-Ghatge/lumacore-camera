@@ -36,6 +36,7 @@ import com.lumacore.camera.core.model.LensFacing
 import com.lumacore.camera.core.nativebridge.NativePipeline
 import com.lumacore.camera.core.neural.BilateralGridInferenceEngine
 import com.lumacore.camera.core.sensor.GyroscopeSampler
+import com.lumacore.camera.core.sensor.ThermalManager
 import com.lumacore.camera.core.storage.MediaSaver
 import com.lumacore.camera.core.strategy.CaptureModeStrategy
 import kotlinx.coroutines.CoroutineScope
@@ -127,6 +128,7 @@ class Camera2CaptureEngine(
     private val processingMutex: Mutex = Mutex()
     val ringBuffer: BoundedImageRingBuffer = BoundedImageRingBuffer(maxCapacity = 10)
     private val gyroSampler: GyroscopeSampler = GyroscopeSampler(context)
+    val thermalManager: ThermalManager = ThermalManager(context)
     private val onnxEngine: BilateralGridInferenceEngine = BilateralGridInferenceEngine(context)
     private val glUpsampler: GlesBilateralUpsampler = GlesBilateralUpsampler(context)
     var latestTelemetrySummary: String? = null
@@ -523,7 +525,12 @@ class Camera2CaptureEngine(
 
         ringBuffer.clear()
         gyroSampler.startSampling()
-        val totalFrames = strategy.burstCount
+        val burstScalingFactor = thermalManager.getBurstScalingFactor()
+        val totalFrames = if (strategy.burstCount > 1) {
+            maxOf(2, kotlin.math.round(strategy.burstCount * burstScalingFactor).toInt())
+        } else {
+            1
+        }
 
         // Dynamic Metering: Inspect latest preview result to detect low light
         val previewResult = latestPreviewResult
@@ -901,7 +908,9 @@ class Camera2CaptureEngine(
         val totalMem = Runtime.getRuntime().totalMemory()
         val freeMem = Runtime.getRuntime().freeMemory()
         val usedRamMb = (totalMem - freeMem) / (1024 * 1024)
-        val telemetry = "Mode: ${strategy.mode.name} | Tier: $tier | Align: 0.0ms | Merge: 0.0ms | ONNX: ${String.format(Locale.US, "%.1f", onnxMs)}ms | GL: ${String.format(Locale.US, "%.1f", glMs)}ms | RAM: ${usedRamMb}MB"
+        val thermalLabel = thermalManager.getThermalStatusLabel()
+        val scalingPct = (thermalManager.getBurstScalingFactor() * 100).toInt()
+        val telemetry = "Mode: ${strategy.mode.name} | Tier: $tier | Align: 0.0ms | Merge: 0.0ms | ONNX: ${String.format(Locale.US, "%.1f", onnxMs)}ms | GL: ${String.format(Locale.US, "%.1f", glMs)}ms | Thermal: $thermalLabel | Scaling: $scalingPct% | RAM: ${usedRamMb}MB"
         Log.i(TAG, telemetry)
         latestTelemetrySummary = telemetry
 
@@ -1153,7 +1162,9 @@ class Camera2CaptureEngine(
         val totalMem = Runtime.getRuntime().totalMemory()
         val freeMem = Runtime.getRuntime().freeMemory()
         val usedRamMb = (totalMem - freeMem) / (1024 * 1024)
-        val telemetry = "Mode: ${strategy.mode.name} | Tier: $tier | Color: ${String.format(Locale.US, "%.1f", colorMs)}ms | Align: ${String.format(Locale.US, "%.1f", alignMs)}ms | Merge: ${String.format(Locale.US, "%.1f", mergeMs)}ms | ONNX: ${String.format(Locale.US, "%.1f", onnxMs)}ms | GL: ${String.format(Locale.US, "%.1f", glMs)}ms | Safety: ${String.format(Locale.US, "%.2f", gridResult.safetyBlend)} | Ghost: ${String.format(Locale.US, "%.1f", ghostRatio)}% | RAM: ${usedRamMb}MB"
+        val thermalLabel = thermalManager.getThermalStatusLabel()
+        val scalingPct = (thermalManager.getBurstScalingFactor() * 100).toInt()
+        val telemetry = "Mode: ${strategy.mode.name} | Tier: $tier | Color: ${String.format(Locale.US, "%.1f", colorMs)}ms | Align: ${String.format(Locale.US, "%.1f", alignMs)}ms | Merge: ${String.format(Locale.US, "%.1f", mergeMs)}ms | ONNX: ${String.format(Locale.US, "%.1f", onnxMs)}ms | GL: ${String.format(Locale.US, "%.1f", glMs)}ms | Safety: ${String.format(Locale.US, "%.2f", gridResult.safetyBlend)} | Ghost: ${String.format(Locale.US, "%.1f", ghostRatio)}% | Thermal: $thermalLabel | Scaling: $scalingPct% | RAM: ${usedRamMb}MB"
         Log.i(TAG, telemetry)
         latestTelemetrySummary = telemetry
 
@@ -1215,6 +1226,7 @@ class Camera2CaptureEngine(
     override fun close(): Unit {
         closeCamera()
         gyroSampler.stopSampling()
+        thermalManager.close()
         ringBuffer.close()
         onnxEngine.close()
         glUpsampler.close()

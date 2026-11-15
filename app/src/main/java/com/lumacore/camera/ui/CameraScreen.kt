@@ -28,6 +28,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.lumacore.camera.core.model.AspectRatioSetting
 import com.lumacore.camera.ui.components.BottomControlDeck
+import com.lumacore.camera.ui.components.GalleryOverlay
 import com.lumacore.camera.ui.components.SettingsBottomSheet
 import com.lumacore.camera.ui.components.TopControlBar
 import com.lumacore.camera.ui.components.ViewfinderControls
@@ -155,7 +156,7 @@ fun CameraScreen(
                 onModeSelected = viewModel::onCaptureModeSelected,
                 onShutterClick = viewModel::onShutterClick,
                 onFlipCameraClick = viewModel::onLensFlip,
-                onGalleryClick = { /* Handled via Intent/PhotoPicker in M2 */ },
+                onGalleryClick = viewModel::onOpenGallery,
                 onIsoSelected = viewModel::onIsoSelected,
                 onShutterSpeedSelected = viewModel::onShutterSpeedSelected,
                 onFocusDistanceChanged = viewModel::onFocusDistanceChanged,
@@ -178,6 +179,16 @@ fun CameraScreen(
                 onToggleNeuralEngine = viewModel::onToggleNeuralEngine,
                 onToggleRawDng = viewModel::onToggleRawDng,
                 onToggleVideoStabilization = viewModel::onToggleVideoStabilization
+            )
+        }
+
+        // 5. In-App Filmstrip Gallery Overlay with Split-Screen Before/After Slider
+        if (uiState.isGalleryOpen) {
+            GalleryOverlay(
+                uiState = uiState,
+                onClose = viewModel::onCloseGallery,
+                onSelectPhoto = viewModel::onSelectGalleryPhoto,
+                onDeletePhoto = viewModel::onDeleteCurrentGalleryPhoto
             )
         }
     }
